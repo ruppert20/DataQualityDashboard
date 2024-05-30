@@ -58,7 +58,7 @@
         }
       }
       # check if full query needs to be saved
-      if grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE) {
+      if (grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE)) {
 
         # create andromeda object
         andromedaObject <- Andromeda::andromeda()

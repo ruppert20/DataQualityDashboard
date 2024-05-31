@@ -62,6 +62,7 @@
     tolower(checkDescription$checkLevel),
     checkDescription$evaluationFilter
   )
+  ParallelLogger::logInfo("A")
   checks <- eval(parse(text = filterExpression))
 
   if (length(cohortDefinitionId > 0)) {
@@ -75,7 +76,7 @@
       columns <- lapply(names(check), function(c) {
         setNames(check[c], c)
       })
-
+      ParallelLogger::logInfo("B")
       params <- c(
         list(dbms = connectionDetails$dbms),
         list(sqlFilename = checkDescription$sqlFile),
@@ -89,10 +90,11 @@
         list(cohort = cohort),
         unlist(columns, recursive = FALSE)
       )
-
+      ParallelLogger::logInfo("C")
       sql <- do.call(SqlRender::loadRenderTranslateSql, params)
 
       if (sqlOnly && sqlOnlyIncrementalInsert) {
+        ParallelLogger::logInfo("D")
         checkQuery <- .createSqlOnlyQueries(
           params,
           check,
@@ -105,6 +107,7 @@
         )
         data.frame(query = checkQuery)
       } else if (sqlOnly) {
+        ParallelLogger::logInfo("E")
         write(x = sql, file = file.path(
           outputFolder,
           sprintf("%s.sql", checkDescription$checkName)

@@ -38,5 +38,6 @@
     na = c(" ", "")
   )
   result <- as.data.frame(result)
+  result$rowIndex2 <- 1:nrow(result) 
   return(result)
 }

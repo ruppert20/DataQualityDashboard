@@ -77,7 +77,8 @@
         )
 
         # define base file path
-        baseFilePath <- file.path(outputFolder, stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""))
+        baseFilePath <- file.path(outputFolder, as.character(check["rowIndex2"]))
+        # baseFilePath <- file.path(outputFolder, stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""))
 
         # save andromeda object
         Andromeda::saveAndromeda(andromeda = andromedaObject,
@@ -85,49 +86,49 @@
                                 maintainConnection = TRUE,
                                 overwrite = TRUE)
 
-        # # query the andromeda database to get required columns for statistics
-        # qData <- RSQLite::dbGetQuery(andromedaObject, "SELECT * FROM query_result;")
+        # query the andromeda database to get required columns for statistics
+        qData <- RSQLite::dbGetQuery(andromedaObject, "SELECT * FROM query_result;")
 
 
-        # # calculate stats
-        # qStats <- qData %>% 
-        #   dplyr::group_by(measurement_concept_id, unit_concept_id) %>%
-        #   dplyr::mutate(
-        #     min = ifelse(all(is.na(value_as_number)), NA, min(value_as_number, na.rm = TRUE)),
-        #     percentile_5 = quantile(value_as_number, probs = 0.05, na.rm = TRUE),
-        #     percentile_25 = quantile(value_as_number, probs = 0.25, na.rm = TRUE),
-        #     median = median(value_as_number, na.rm = TRUE),
-        #     mean = mean(value_as_number, na.rm = TRUE),
-        #     mode = calculate_mode(value_as_number),
-        #     percentile_75 = quantile(value_as_number, probs = 0.75, na.rm = TRUE),
-        #     percentile_95 = quantile(value_as_number, probs = 0.95, na.rm = TRUE),
-        #     max = ifelse(all(is.na(value_as_number)), NA, max(value_as_number, na.rm = TRUE)),
-        #     standard_deviation = sd(value_as_number, na.rm = TRUE),
-        #     median_absolute_deviation = mad(value_as_number, na.rm = TRUE),
-        #     number_of_measurements = dplyr::n(),
-        #     number_of_patients = dplyr::n_distinct(person_id),
-        #     number_of_visits = dplyr::n_distinct(visit_occurrence_id),
-        #     percent_missing = sum(is.na(value_as_number)) / dplyr::n(),
-        #     min_date = min(measurement_datetime),
-        #     max_date = max(measurement_datetime)
-        #   ) %>%
-        #   dplyr::distinct(measurement_concept_id, unit_concept_id, .keep_all = TRUE) %>%
-        #   dplyr::collect()
+        # calculate stats
+        qStats <- qData %>% 
+          dplyr::group_by(measurement_concept_id, unit_concept_id) %>%
+          dplyr::mutate(
+            min = ifelse(all(is.na(value_as_number)), NA, min(value_as_number, na.rm = TRUE)),
+            percentile_5 = quantile(value_as_number, probs = 0.05, na.rm = TRUE),
+            percentile_25 = quantile(value_as_number, probs = 0.25, na.rm = TRUE),
+            median = median(value_as_number, na.rm = TRUE),
+            mean = mean(value_as_number, na.rm = TRUE),
+            mode = calculate_mode(value_as_number),
+            percentile_75 = quantile(value_as_number, probs = 0.75, na.rm = TRUE),
+            percentile_95 = quantile(value_as_number, probs = 0.95, na.rm = TRUE),
+            max = ifelse(all(is.na(value_as_number)), NA, max(value_as_number, na.rm = TRUE)),
+            standard_deviation = sd(value_as_number, na.rm = TRUE),
+            median_absolute_deviation = mad(value_as_number, na.rm = TRUE),
+            number_of_measurements = dplyr::n(),
+            number_of_patients = dplyr::n_distinct(person_id),
+            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+            percent_missing = sum(is.na(value_as_number)) / dplyr::n(),
+            min_date = min(measurement_datetime),
+            max_date = max(measurement_datetime)
+          ) %>%
+          dplyr::distinct(measurement_concept_id, unit_concept_id, .keep_all = TRUE) %>%
+          dplyr::collect()
 
-        # # create table of Values over time
-        # hist_data <- qData %>% 
-        #   dplyr::arrange(measurement_datetime) %>%
-        #   dplyr::mutate(month = format(measurement_datetime, "%m"), year = format(measurement_datetime, "%Y")) %>%
-        #   dplyr::group_by(month, year) %>%
-        #   dplyr::mutate(num_meas = dplyr::n()) %>%
-        #   dplyr::distinct(month, year, num_meas) %>%
-        #   dplyr::ungroup() %>%
-        #   dplyr::arrange(month, year) %>%
-        #   dplyr::collect()
+        # create table of Values over time
+        hist_data <- qData %>% 
+          dplyr::arrange(measurement_datetime) %>%
+          dplyr::mutate(month = format(measurement_datetime, "%m"), year = format(measurement_datetime, "%Y")) %>%
+          dplyr::group_by(month, year) %>%
+          dplyr::mutate(num_meas = dplyr::n()) %>%
+          dplyr::distinct(month, year, num_meas) %>%
+          dplyr::ungroup() %>%
+          dplyr::arrange(month, year) %>%
+          dplyr::collect()
 
-        # # save results
-        # write.csv(qStats, paste(baseFilePath, 'stats.csv', sep='_'), row.names = FALSE)
-        # write.csv(hist_data, paste(baseFilePath, 'time_stats.csv', sep='_'), row.names = FALSE)
+        # save results
+        write.csv(qStats, paste(baseFilePath, 'stats.csv', sep='_'), row.names = FALSE)
+        write.csv(hist_data, paste(baseFilePath, 'time_stats.csv', sep='_'), row.names = FALSE)
 
         # close andromeda object
         Andromeda::close(andromedaObject)

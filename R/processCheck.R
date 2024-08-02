@@ -68,7 +68,7 @@ calculate_mode <- function(x) {
       }
       # check if full query needs to be saved
       ParallelLogger::logInfo("Checking if full result should be saved")
-      ParallelLogger::logInfo(sql)
+      ParallelLogger::logInfo(stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""))
       if (grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE)) {
 
         ParallelLogger::logInfo("Creating Andromeda Object")

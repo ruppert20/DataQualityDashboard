@@ -7,12 +7,12 @@ cdmTableName = @cdmTableName
 cdmFieldName = @cdmFieldName
 conceptId = @conceptId
 unitConceptId = @unitConceptId
+XXXSAVE_FULL_RESULTXXX
+XXXQUERYNAME___@numericStatsNotesXXX
 {@cohort}?{
 cohortDefinitionId = @cohortDefinitionId
 cohortDatabaseSchema = @cohortDatabaseSchema
 cohortTableName = @cohortTableName
-XXXSAVE_FULL_RESULTXXX
-XXXQUERYNAME___@numericStatsNotesXXX
 }
 **********/
 

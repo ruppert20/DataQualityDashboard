@@ -26,6 +26,15 @@
 #' @keywords internal
 #'
 
+calculate_mode <- function(x) {
+  tbl <- table(x)
+  if (length(tbl) == 0) {
+    return(NA)
+  }
+  modes <- tbl == max(tbl)
+  as.numeric(names(modes)[which.max(modes)])
+}
+
 .processCheck <- function(connection,
                           connectionDetails,
                           check,
@@ -58,11 +67,14 @@
         }
       }
       # check if full query needs to be saved
+      ParallelLogger::logInfo("Checking if full result should be saved")
       if (grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE)) {
 
+        ParallelLogger::logInfo("Creating Andromeda Object")
         # create andromeda object
         andromedaObject <- Andromeda::andromeda()
 
+        ParallelLogger::logInfo("Running Query to Adromeda Object")
         # save query result to andromeda object
         DatabaseConnector::querySqlToAndromeda(
           connection = connection,
@@ -77,20 +89,24 @@
         )
 
         # define base file path
-        baseFilePath <- file.path(outputFolder, as.character(check["rowIndex2"]))
-        # baseFilePath <- file.path(outputFolder, stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""))
+        ParallelLogger::logInfo("Defining Andromeda output location")
+        # baseFilePath <- file.path(outputFolder, as.character(check["rowIndex2"]))
+        baseFilePath <- file.path(outputFolder, stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""))
 
         # save andromeda object
+        ParallelLogger::logInfo("Saving Andromeda object to file")
         Andromeda::saveAndromeda(andromeda = andromedaObject,
                                 fileName = paste(baseFilePath, "andromeda", sep='.'),
                                 maintainConnection = TRUE,
                                 overwrite = TRUE)
 
         # query the andromeda database to get required columns for statistics
+        ParallelLogger::logInfo("Reading data into memory")
         qData <- RSQLite::dbGetQuery(andromedaObject, "SELECT * FROM query_result;")
 
 
         # calculate stats
+        ParallelLogger::logInfo("Calculating Numeric summary")
         qStats <- qData %>% 
           dplyr::group_by(measurement_concept_id, unit_concept_id) %>%
           dplyr::mutate(
@@ -116,6 +132,7 @@
           dplyr::collect()
 
         # create table of Values over time
+        ParallelLogger::logInfo("Summarizing trends in data")
         hist_data <- qData %>% 
           dplyr::arrange(measurement_datetime) %>%
           dplyr::mutate(month = format(measurement_datetime, "%m"), year = format(measurement_datetime, "%Y")) %>%
@@ -127,10 +144,12 @@
           dplyr::collect()
 
         # save results
+        ParallelLogger::logInfo("Saving Summaries")
         write.csv(qStats, paste(baseFilePath, 'stats.csv', sep='_'), row.names = FALSE)
         write.csv(hist_data, paste(baseFilePath, 'time_stats.csv', sep='_'), row.names = FALSE)
 
         # close andromeda object
+        ParallelLogger::logInfo("Cleaning Up")
         Andromeda::close(andromedaObject)
 
         # create output to match expected output
@@ -148,6 +167,7 @@
 
           
       } else {
+        ParallelLogger::logInfo("Running Query Not using Andromeda")
         result <- DatabaseConnector::querySql(
         connection = connection, sql = sql,
         errorReportFile = errorReportFile,

@@ -14,14 +14,15 @@ cohortDatabaseSchema = @cohortDatabaseSchema
 cohortTableName = @cohortTableName
 }
 XXXSAVE_FULL_RESULTXXX
-XXXQUERYNAME___VALUE_AS_CONCEPT_CHECKXXX
+XXXQUERYNAME___@conceptStatsNotesXXX
 **********/
 
 SELECT 
 	m.person_id,
 	m.visit_occurrence_id,
 	m.@cdmFieldName,
-	m.value_as_concept_id
+	m.value_as_concept_id,
+	m.unit_concept_id
 
 FROM @cdmDatabaseSchema.@cdmTableName m
 	{@cohort}?{

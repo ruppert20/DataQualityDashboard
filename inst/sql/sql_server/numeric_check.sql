@@ -12,7 +12,7 @@ cohortDefinitionId = @cohortDefinitionId
 cohortDatabaseSchema = @cohortDatabaseSchema
 cohortTableName = @cohortTableName
 XXXSAVE_FULL_RESULTXXX
-XXXQUERYNAME___VALUE_AS_NUMBER_CHECKXXX
+XXXQUERYNAME___@numericStatsNotesXXX
 }
 **********/
 

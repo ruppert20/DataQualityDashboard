@@ -19,6 +19,7 @@ cohortTableName = @cohortTableName
 SELECT 
 	m.person_id,
 	m.visit_occurrence_id,
+	m.@cdmTableName_datetime,
 	m.@cdmFieldName,
 	m.value_as_number,
 	m.unit_concept_id

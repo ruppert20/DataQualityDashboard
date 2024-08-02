@@ -20,6 +20,7 @@ XXXQUERYNAME___@conceptStatsNotesXXX
 SELECT 
 	m.person_id,
 	m.visit_occurrence_id,
+	m.@cdmTableName_datetime,
 	m.@cdmFieldName,
 	m.value_as_concept_id,
 	m.unit_concept_id

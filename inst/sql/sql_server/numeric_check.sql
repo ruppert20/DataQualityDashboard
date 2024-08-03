@@ -19,8 +19,9 @@ cohortTableName = @cohortTableName
 SELECT 
 	m.person_id,
 	m.visit_occurrence_id,
-	m.@cdmTableName_datetime,
-	m.@cdmFieldName,
+	m.@cdmTableName_datetime as measurement_datetime,
+	m.@cdmFieldName as measurement_concept_id,
+	m.value_as_concept_id,
 	m.value_as_number,
 	m.unit_concept_id
 
@@ -32,6 +33,6 @@ FROM @cdmDatabaseSchema.@cdmTableName m
 	}
 WHERE
 	m.@cdmFieldName IN (@conceptId)
-	{@unitConceptId NOT IN ('NA', -1, False, '')}?{
-		AND m.unit_concept_id = @unitConceptId
+	{@unitConceptId NOT IN ('NA', -1, FALSE, '')}?{
+		AND m.unit_concept_id IN (@unitConceptId)
 		};

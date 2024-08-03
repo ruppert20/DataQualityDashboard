@@ -67,15 +67,21 @@ calculate_mode <- function(x) {
         }
       }
       # check if full query needs to be saved
-      ParallelLogger::logInfo("Checking if full result should be saved")
-      ParallelLogger::logInfo(stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""))
       if (grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE)) {
 
-        ParallelLogger::logInfo("Creating Andromeda Object")
+        # extract Variable name
+        check_name <- paste(stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""),
+                            tolower(check["cdmTableName"]), sep='_')
+
+        # replace any bad timecolumns
+        querySQL <- gsub("exposure_datetime", "exposure_start_datetime", tolower(sql))
+        querySQL <- gsub("procedure_occurrence_datetime", "procedure_datetime", querySQL)
+        querySQL <- gsub("occurrence_datetime", "start_datetime", querySQL)
+
         # create andromeda object
         andromedaObject <- Andromeda::andromeda()
 
-        ParallelLogger::logInfo("Running Query to Adromeda Object")
+        ParallelLogger::logInfo(sprintf("Running %s Query", check_name))
         # save query result to andromeda object
         DatabaseConnector::querySqlToAndromeda(
           connection = connection,
@@ -90,50 +96,107 @@ calculate_mode <- function(x) {
         )
 
         # define base file path
-        ParallelLogger::logInfo("Defining Andromeda output location")
-        # baseFilePath <- file.path(outputFolder, as.character(check["rowIndex2"]))
-        baseFilePath <- file.path(outputFolder, stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""))
+        baseFilePath <- file.path(outputFolder, check_name)
 
         # save andromeda object
-        ParallelLogger::logInfo("Saving Andromeda object to file")
         Andromeda::saveAndromeda(andromeda = andromedaObject,
                                 fileName = paste(baseFilePath, "andromeda", sep='.'),
                                 maintainConnection = TRUE,
                                 overwrite = TRUE)
 
         # query the andromeda database to get required columns for statistics
-        ParallelLogger::logInfo("Reading data into memory")
         qData <- RSQLite::dbGetQuery(andromedaObject, "SELECT * FROM query_result;")
 
+        if (grepl('VALUE_AS_NUMBER_CHECK', sql, TRUE)){
+          # calculate stats
+          ParallelLogger::logInfo(sprintf("Calculating Numeric summary for %s", check_name))
+          qStats <- rbind(qData %>% 
+                          dplyr::group_by(measurement_concept_id, unit_concept_id) %>%
+                          dplyr::summarise(
+                            min = ifelse(all(is.na(value_as_number)), NA, min(value_as_number, na.rm = TRUE)),
+                            percentile_5 = quantile(value_as_number, probs = 0.05, na.rm = TRUE),
+                            percentile_25 = quantile(value_as_number, probs = 0.25, na.rm = TRUE),
+                            median = median(value_as_number, na.rm = TRUE),
+                            mean = mean(value_as_number, na.rm = TRUE),
+                            mode = calculate_mode(value_as_number),
+                            percentile_75 = quantile(value_as_number, probs = 0.75, na.rm = TRUE),
+                            percentile_95 = quantile(value_as_number, probs = 0.95, na.rm = TRUE),
+                            max = ifelse(all(is.na(value_as_number)), NA, max(value_as_number, na.rm = TRUE)),
+                            standard_deviation = sd(value_as_number, na.rm = TRUE),
+                            median_absolute_deviation = mad(value_as_number, na.rm = TRUE),
+                            number_of_measurements = dplyr::n(),
+                            number_of_patients = dplyr::n_distinct(person_id),
+                            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_missing = sum(is.na(value_as_number)) / dplyr::n(),
+                            min_date = min(measurement_datetime),
+                            max_date = max(measurement_datetime)
+                          ) %>% dplyr::ungroup(), qData %>% 
+                          dplyr::group_by(unit_concept_id) %>%
+                          dplyr::summarise(
+                            min = ifelse(all(is.na(value_as_number)), NA, min(value_as_number, na.rm = TRUE)),
+                            percentile_5 = quantile(value_as_number, probs = 0.05, na.rm = TRUE),
+                            percentile_25 = quantile(value_as_number, probs = 0.25, na.rm = TRUE),
+                            median = median(value_as_number, na.rm = TRUE),
+                            mean = mean(value_as_number, na.rm = TRUE),
+                            mode = calculate_mode(value_as_number),
+                            percentile_75 = quantile(value_as_number, probs = 0.75, na.rm = TRUE),
+                            percentile_95 = quantile(value_as_number, probs = 0.95, na.rm = TRUE),
+                            max = ifelse(all(is.na(value_as_number)), NA, max(value_as_number, na.rm = TRUE)),
+                            standard_deviation = sd(value_as_number, na.rm = TRUE),
+                            median_absolute_deviation = mad(value_as_number, na.rm = TRUE),
+                            number_of_measurements = dplyr::n(),
+                            number_of_patients = dplyr::n_distinct(person_id),
+                            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_missing = sum(is.na(value_as_number)) / dplyr::n(),
+                            min_date = min(measurement_datetime),
+                            max_date = max(measurement_datetime)
+                          ) %>% dplyr::ungroup() %>%
+                          dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_')))
 
-        # calculate stats
-        ParallelLogger::logInfo("Calculating Numeric summary")
-        qStats <- qData %>% 
-          dplyr::group_by(measurement_concept_id, unit_concept_id) %>%
-          dplyr::mutate(
-            min = ifelse(all(is.na(value_as_number)), NA, min(value_as_number, na.rm = TRUE)),
-            percentile_5 = quantile(value_as_number, probs = 0.05, na.rm = TRUE),
-            percentile_25 = quantile(value_as_number, probs = 0.25, na.rm = TRUE),
-            median = median(value_as_number, na.rm = TRUE),
-            mean = mean(value_as_number, na.rm = TRUE),
-            mode = calculate_mode(value_as_number),
-            percentile_75 = quantile(value_as_number, probs = 0.75, na.rm = TRUE),
-            percentile_95 = quantile(value_as_number, probs = 0.95, na.rm = TRUE),
-            max = ifelse(all(is.na(value_as_number)), NA, max(value_as_number, na.rm = TRUE)),
-            standard_deviation = sd(value_as_number, na.rm = TRUE),
-            median_absolute_deviation = mad(value_as_number, na.rm = TRUE),
-            number_of_measurements = dplyr::n(),
-            number_of_patients = dplyr::n_distinct(person_id),
-            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
-            percent_missing = sum(is.na(value_as_number)) / dplyr::n(),
-            min_date = min(measurement_datetime),
-            max_date = max(measurement_datetime)
-          ) %>%
-          dplyr::distinct(measurement_concept_id, unit_concept_id, .keep_all = TRUE) %>%
-          dplyr::collect()
-
+             # calculate stats
+          ParallelLogger::logInfo(sprintf("Calculating Value as Concept summary for %s", check_name))
+          write.csv(rbind(qData %>% 
+                          dplyr::group_by(measurement_concept_id, value_as_concept_id) %>%
+                          dplyr::summarise(
+                            number_of_measurements = dplyr::n(),
+                            number_of_patients = dplyr::n_distinct(person_id),
+                            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            min_date = min(measurement_datetime),
+                            max_date = max(measurement_datetime)
+                          ) %>% dplyr::ungroup(), qData %>%
+                          dplyr::summarise(
+                            number_of_measurements = dplyr::n(),
+                            number_of_patients = dplyr::n_distinct(person_id),
+                            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_missing = sum(is.na(value_as_concept_id)) / dplyr::n(),
+                            min_date = min(measurement_datetime),
+                            max_date = max(measurement_datetime)
+                          )%>%
+                          dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_'))),
+                          paste(baseFilePath, 'value_as_concept_stats.csv', sep='_'), row.names = FALSE)
+        } else if (grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)){
+           # calculate stats
+          ParallelLogger::logInfo(sprintf("Calculating Concept summary for %s", check_name))
+          qStats <- rbind(qData %>% 
+                          dplyr::group_by(measurement_concept_id) %>%
+                          dplyr::summarise(
+                            number_of_measurements = dplyr::n(),
+                            number_of_patients = dplyr::n_distinct(person_id),
+                            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            min_date = min(measurement_datetime),
+                            max_date = max(measurement_datetime)
+                          ) %>% dplyr::ungroup(), qData %>%
+                          dplyr::summarise(
+                            number_of_measurements = dplyr::n(),
+                            number_of_patients = dplyr::n_distinct(person_id),
+                            number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            min_date = min(measurement_datetime),
+                            max_date = max(measurement_datetime)
+                          ) %>%
+                          dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_')))
+        }
+        
         # create table of Values over time
-        ParallelLogger::logInfo("Summarizing trends in data")
         hist_data <- qData %>% 
           dplyr::arrange(measurement_datetime) %>%
           dplyr::mutate(month = format(measurement_datetime, "%m"), year = format(measurement_datetime, "%Y")) %>%
@@ -145,12 +208,14 @@ calculate_mode <- function(x) {
           dplyr::collect()
 
         # save results
-        ParallelLogger::logInfo("Saving Summaries")
-        write.csv(qStats, paste(baseFilePath, 'stats.csv', sep='_'), row.names = FALSE)
+        ParallelLogger::logInfo(sprintf("Saving %s Summary Files", check_name))
+        if (grepl('VALUE_AS_CONCEPT_CHECK', sql, TRUE) | grepl('VALUE_AS_NUMBER_CHECK', sql, TRUE) | grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)){
+          write.csv(qStats, paste(baseFilePath, 'stats.csv', sep='_'), row.names = FALSE)
+        }
+        
         write.csv(hist_data, paste(baseFilePath, 'time_stats.csv', sep='_'), row.names = FALSE)
 
         # close andromeda object
-        ParallelLogger::logInfo("Cleaning Up")
         Andromeda::close(andromedaObject)
 
         # create output to match expected output
@@ -159,16 +224,10 @@ calculate_mode <- function(x) {
           pct_violated_rows = c(0),
           num_denominator_rows = c(1)
         )
-        # result <-  data.frame(
-        #   num_violated_rows= c(sum(qStats$percent_missing)), 
-        #   pct_violated_rows = c(sum(qStats$percent_missing)/sum(qStats$number_of_measurements)),
-        #   num_denominator_rows = c(sum(qStats$number_of_measurements))
-        # )
 
 
           
       } else {
-        ParallelLogger::logInfo("Running Query Not using Andromeda")
         result <- DatabaseConnector::querySql(
         connection = connection, sql = sql,
         errorReportFile = errorReportFile,

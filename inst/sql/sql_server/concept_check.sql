@@ -1,13 +1,11 @@
 /*********
-VALUE_AS_NUMBER_CHECK
-PLAUSIBLE_VALUE_HIGH - find any MEASUREMENT records that have VALUE_AS_NUMBER with non-null value > plausible high value
+CONCEPT_CENSUS_CHECK
 
 Parameters used in this template:
 cdmDatabaseSchema = @cdmDatabaseSchema
 cdmTableName = @cdmTableName
 cdmFieldName = @cdmFieldName
 conceptId = @conceptId
-unitConceptId = @unitConceptId
 {@cohort}?{
 cohortDefinitionId = @cohortDefinitionId
 cohortDatabaseSchema = @cohortDatabaseSchema
@@ -20,10 +18,8 @@ XXXQUERYNAME___@conceptStatsNotesXXX
 SELECT 
 	m.person_id,
 	m.visit_occurrence_id,
-	m.@cdmTableName_datetime,
-	m.@cdmFieldName,
-	m.value_as_concept_id,
-	m.unit_concept_id
+	m.@cdmTableName_datetime as measurement_datetime,
+	m.@cdmFieldName as measurement_concept_id
 
 FROM @cdmDatabaseSchema.@cdmTableName m
 	{@cohort}?{

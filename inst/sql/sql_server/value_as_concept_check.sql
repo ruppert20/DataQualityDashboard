@@ -11,12 +11,16 @@ cohortDefinitionId = @cohortDefinitionId
 cohortDatabaseSchema = @cohortDatabaseSchema
 cohortTableName = @cohortTableName
 }
+XXXSAVE_FULL_RESULTXXX
+XXXQUERYNAME___@valueConceptStatsNotesXXX
 **********/
 
 SELECT 
 	m.person_id,
 	m.visit_occurrence_id,
-	m.@cdmFieldName
+	m.@cdmTableName_datetime as measurement_datetime,
+	m.@cdmFieldName as measurement_concept_id
+
 FROM @cdmDatabaseSchema.@cdmTableName m
 	{@cohort}?{
 		JOIN @cohortDatabaseSchema.@cohortTableName c

@@ -80,6 +80,9 @@ calculate_mode <- function(x) {
         querySQL <- gsub("procedure_occurrence_datetime", "procedure_datetime", querySQL)
         querySQL <- gsub("occurrence_datetime", "start_datetime", querySQL)
 
+        # define base file path
+        baseFilePath <- file.path(outputFolder, check_name)
+
         andromedaFP <- paste(baseFilePath, "andromeda", sep='.')
 
         if (resume & File.exists(andromedaFP)) {
@@ -99,9 +102,6 @@ calculate_mode <- function(x) {
             integerAsNumeric = getOption("databaseConnectorIntegerAsNumeric", default = TRUE),
             integer64AsNumeric = getOption("databaseConnectorInteger64AsNumeric", default = TRUE)
           )
-
-          # define base file path
-          baseFilePath <- file.path(outputFolder, check_name)
 
           # save andromeda object
           Andromeda::saveAndromeda(andromeda = andromedaObject,

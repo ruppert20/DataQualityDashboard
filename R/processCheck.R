@@ -22,6 +22,7 @@
 #' @param checkDescription          The description of the data quality check
 #' @param sql                       The fully qualified sql for the data quality check
 #' @param outputFolder              The folder to output logs and SQL files to.
+#' @param resume                    Whether to used a cached andromeda query of the result or to fetch a new one from the server. This paramter is for developer purposes only and is not intented to be used in production.
 #'
 #' @keywords internal
 #'
@@ -40,7 +41,8 @@ calculate_mode <- function(x) {
                           check,
                           checkDescription,
                           sql,
-                          outputFolder) {
+                          outputFolder,
+                          resume = TRUE) {
   singleThreaded <- TRUE
   start <- Sys.time()
   if (is.null(connection)) {
@@ -78,31 +80,39 @@ calculate_mode <- function(x) {
         querySQL <- gsub("procedure_occurrence_datetime", "procedure_datetime", querySQL)
         querySQL <- gsub("occurrence_datetime", "start_datetime", querySQL)
 
-        # create andromeda object
-        andromedaObject <- Andromeda::andromeda()
+        andromedaFP <- paste(baseFilePath, "andromeda", sep='.')
 
-        ParallelLogger::logInfo(sprintf("Running %s Query", check_name))
-        # save query result to andromeda object
-        DatabaseConnector::querySqlToAndromeda(
-          connection = connection,
-          sql = tolower(sql),
-          andromeda = andromedaObject,
-          andromedaTableName = 'query_result',
-          errorReportFile = errorReportFile,
-          snakeCaseToCamelCase = FALSE,
-          appendToTable = FALSE,
-          integerAsNumeric = getOption("databaseConnectorIntegerAsNumeric", default = TRUE),
-          integer64AsNumeric = getOption("databaseConnectorInteger64AsNumeric", default = TRUE)
-        )
+        if (resume & File.exists(andromedaFP)) {
+          # create andromeda object
+          andromedaObject <- Andromeda::andromeda()
 
-        # define base file path
-        baseFilePath <- file.path(outputFolder, check_name)
+          ParallelLogger::logInfo(sprintf("Running %s Query", check_name))
+          # save query result to andromeda object
+          DatabaseConnector::querySqlToAndromeda(
+            connection = connection,
+            sql = tolower(sql),
+            andromeda = andromedaObject,
+            andromedaTableName = 'query_result',
+            errorReportFile = errorReportFile,
+            snakeCaseToCamelCase = FALSE,
+            appendToTable = FALSE,
+            integerAsNumeric = getOption("databaseConnectorIntegerAsNumeric", default = TRUE),
+            integer64AsNumeric = getOption("databaseConnectorInteger64AsNumeric", default = TRUE)
+          )
 
-        # save andromeda object
-        Andromeda::saveAndromeda(andromeda = andromedaObject,
-                                fileName = paste(baseFilePath, "andromeda", sep='.'),
-                                maintainConnection = TRUE,
-                                overwrite = TRUE)
+          # define base file path
+          baseFilePath <- file.path(outputFolder, check_name)
+
+          # save andromeda object
+          Andromeda::saveAndromeda(andromeda = andromedaObject,
+                                  fileName = andromedaFP,
+                                  maintainConnection = TRUE,
+                                  overwrite = TRUE)
+        } else {
+          andromedaObject <- Andromeda::loadAndromeda(andromedaFP)
+        }
+
+        
 
         # query the andromeda database to get required columns for statistics
         qData <- RSQLite::dbGetQuery(andromedaObject, "SELECT * FROM query_result;")
@@ -163,7 +173,7 @@ calculate_mode <- function(x) {
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
-                          ) %>% dplyr::ungroup(), qData %>%
+                          ) %>% dplyr::ungroup() %>% dplyr::mutate(percent_missing = NA), qData %>%
                           dplyr::summarise(
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
@@ -172,7 +182,7 @@ calculate_mode <- function(x) {
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
                           )%>%
-                          dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_'))),
+                          dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_'), value_as_concept_id=NA)),
                           paste(baseFilePath, 'value_as_concept_stats.csv', sep='_'), row.names = FALSE)
         } else if (grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)){
            # calculate stats

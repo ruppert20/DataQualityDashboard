@@ -86,6 +86,8 @@ calculate_mode <- function(x) {
         andromedaFP <- paste(baseFilePath, "andromeda", sep='.')
 
         if (resume & file.exists(andromedaFP)) {
+          andromedaObject <- Andromeda::loadAndromeda(andromedaFP)
+        } else {
           # create andromeda object
           andromedaObject <- Andromeda::andromeda()
 
@@ -108,8 +110,6 @@ calculate_mode <- function(x) {
                                   fileName = andromedaFP,
                                   maintainConnection = TRUE,
                                   overwrite = TRUE)
-        } else {
-          andromedaObject <- Andromeda::loadAndromeda(andromedaFP)
         }
 
         

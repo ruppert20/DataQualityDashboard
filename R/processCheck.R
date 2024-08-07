@@ -95,7 +95,7 @@ calculate_mode <- function(x) {
           # save query result to andromeda object
           DatabaseConnector::querySqlToAndromeda(
             connection = connection,
-            sql = tolower(sql),
+            sql = querySQL,
             andromeda = andromedaObject,
             andromedaTableName = 'query_result',
             errorReportFile = errorReportFile,

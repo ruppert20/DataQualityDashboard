@@ -77,8 +77,9 @@ calculate_mode <- function(x) {
 
         # replace any bad timecolumns
         querySQL <- gsub("exposure_datetime", "exposure_start_datetime", tolower(sql))
-        querySQL <- gsub("procedure_occurrence_datetime", "procedure_datetime", querySQL)
+        querySQL <- gsub("procedure_occurrence_datetime", "procedure_date", querySQL)
         querySQL <- gsub("occurrence_datetime", "start_datetime", querySQL)
+        querySQL <- gsub("condition_start_datetime", "condition_start_date", querySQL)
 
         # define base file path
         baseFilePath <- file.path(outputFolder, check_name)

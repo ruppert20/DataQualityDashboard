@@ -314,6 +314,33 @@ executeDqChecks <- function(connectionDetails,
   if (!sqlOnly) {
     checkResults <- do.call(rbind, resultsList)
 
+    # time_stats.csv
+    timeStatFileList = list.files(path=outputFolder, pattern="*time_stats.csv$")
+
+    # value_as_concept_stats.csv
+    valueAsConceptStatFileList = list.files(path=outputFolder, pattern="*value_as_concept_stats.csv$")
+
+    # stats.csv
+    statFileList = setdiff(list.files(path=outputFolder, pattern="*stats.csv$"), c(timeStatFileList, valueAsConceptStatFileList))
+
+    fileDict <= c("time_stats"=timeStatFileList,
+                  "value_as_concept_stats"=valueAsConceptStatFileList,
+                  "stats"=statFileList)
+
+    for (stat_type in names(fileDict)){
+      if (len(fileDict[stat_type]) > 0) {
+        df_input_list <- lapply(fileDict[stat_type], read.csv)
+
+        names(df_input_list) <- gsub(filelist, pattern="\\..*", replacement="")
+
+        write.csv(bind_rows(df_input_list, .id = "id"),
+                  file.path(outputFolder, paste('master', paste(stat_type, 'csv', sep='.'), sep='_')), row.names = FALSE)
+                
+
+      }
+      
+    }
+
     # evaluate thresholds-------------------------------------------------------------------
     checkResults <- .evaluateThresholds(
       checkResults = checkResults,

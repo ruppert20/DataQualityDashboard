@@ -92,6 +92,7 @@
       )
       # ParallelLogger::logInfo("C")
       sql <- do.call(SqlRender::loadRenderTranslateSql, params)
+      print(params[0])
 
       if (sqlOnly && sqlOnlyIncrementalInsert) {
         # ParallelLogger::logInfo("D")

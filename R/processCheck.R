@@ -71,6 +71,9 @@ calculate_mode <- function(x) {
       # check if full query needs to be saved
       if (grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE)) {
 
+        # get the visit and person stats for the selected cohort
+        
+
         # extract Variable name
         check_name <- paste(stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""),
                             tolower(check["cdmTableName"]), sep='_')
@@ -138,7 +141,7 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
-                            percent_missing = sum(is.na(value_as_number)) / dplyr::n(),
+                            percent_missing = round(sum(is.na(value_as_number)) / dplyr::n() * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
                           ) %>% dplyr::ungroup(), qData %>% 
@@ -158,7 +161,7 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
-                            percent_missing = sum(is.na(value_as_number)) / dplyr::n(),
+                            percent_missing = round(sum(is.na(value_as_number)) / dplyr::n() * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
                           ) %>% dplyr::ungroup() %>%
@@ -179,7 +182,7 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
-                            percent_missing = sum(is.na(value_as_concept_id)) / dplyr::n(),
+                            percent_missing = round(sum(is.na(value_as_concept_id)) / dplyr::n() * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
                           )%>%
@@ -211,11 +214,11 @@ calculate_mode <- function(x) {
         hist_data <- qData %>% 
           dplyr::arrange(measurement_datetime) %>%
           dplyr::mutate(month = format(measurement_datetime, "%m"), year = format(measurement_datetime, "%Y")) %>%
-          dplyr::group_by(month, year) %>%
+          dplyr::group_by(year, month) %>%
           dplyr::mutate(num_meas = dplyr::n()) %>%
-          dplyr::distinct(month, year, num_meas) %>%
+          dplyr::distinct(year, month, num_meas) %>%
           dplyr::ungroup() %>%
-          dplyr::arrange(month, year) %>%
+          dplyr::arrange(year, month) %>%
           dplyr::collect()
 
         # save results

@@ -42,6 +42,7 @@ calculate_mode <- function(x) {
                           checkDescription,
                           sql,
                           outputFolder,
+                          patEncSql,
                           resume = TRUE) {
   singleThreaded <- TRUE
   start <- Sys.time()
@@ -72,7 +73,11 @@ calculate_mode <- function(x) {
       if (grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE)) {
 
         # get the visit and person stats for the selected cohort
-        
+        patEncResult <- DatabaseConnector::querySql(
+                                                    connection = connection, sql = patEncSql,
+                                                    errorReportFile = errorReportFile,
+                                                    snakeCaseToCamelCase = TRUE
+      )
 
         # extract Variable name
         check_name <- paste(stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""),
@@ -141,6 +146,8 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_patients = round(dplyr::n_distinct(person_id) / patEncResult$persons[1] * 100, 2),
+                            percent_visits = round(dplyr::n_distinct(visit_occurrence_id) / patEncResult$encounters[1] * 100, 2),
                             percent_missing = round(sum(is.na(value_as_number)) / dplyr::n() * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
@@ -161,6 +168,8 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_patients = round(dplyr::n_distinct(person_id) / patEncResult$persons[1] * 100, 2),
+                            percent_visits = round(dplyr::n_distinct(visit_occurrence_id) / patEncResult$encounters[1] * 100, 2),
                             percent_missing = round(sum(is.na(value_as_number)) / dplyr::n() * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
@@ -175,6 +184,8 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_patients = round(dplyr::n_distinct(person_id) / patEncResult$persons[1] * 100, 2),
+                            percent_visits = round(dplyr::n_distinct(visit_occurrence_id) / patEncResult$encounters[1] * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
                           ) %>% dplyr::ungroup() %>% dplyr::mutate(percent_missing = NA), qData %>%
@@ -182,6 +193,8 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_patients = round(dplyr::n_distinct(person_id) / patEncResult$persons[1] * 100, 2),
+                            percent_visits = round(dplyr::n_distinct(visit_occurrence_id) / patEncResult$encounters[1] * 100, 2),
                             percent_missing = round(sum(is.na(value_as_concept_id)) / dplyr::n() * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
@@ -197,6 +210,8 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_patients = round(dplyr::n_distinct(person_id) / patEncResult$persons[1] * 100, 2),
+                            percent_visits = round(dplyr::n_distinct(visit_occurrence_id) / patEncResult$encounters[1] * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
                           ) %>% dplyr::ungroup(), qData %>%
@@ -204,6 +219,8 @@ calculate_mode <- function(x) {
                             number_of_measurements = dplyr::n(),
                             number_of_patients = dplyr::n_distinct(person_id),
                             number_of_visits = dplyr::n_distinct(visit_occurrence_id),
+                            percent_patients = round(dplyr::n_distinct(person_id) / patEncResult$persons[1] * 100, 2),
+                            percent_visits = round(dplyr::n_distinct(visit_occurrence_id) / patEncResult$encounters[1] * 100, 2),
                             min_date = min(measurement_datetime),
                             max_date = max(measurement_datetime)
                           ) %>%

@@ -39,6 +39,8 @@
     sql,
     connectionDetails,
     checkDescription) {
+
+  
   resultShell <- .recordResult(check = check, checkDescription = checkDescription, sql = sql)
 
   resultShell$queryText <- gsub(";", "", resultShell$queryText)

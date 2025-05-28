@@ -90,12 +90,17 @@
         list(cohort = cohort),
         unlist(columns, recursive = FALSE)
       )
-      # ParallelLogger::logInfo("C")
+      # render the person/visit query
+      patEncParams <- params
+      patEncParams$sqlFilename <- "patient_and_encounter_stats.sql"
+      patEncSql <- do.call(SqlRender::loadRenderTranslateSql, patEncParams)
+
       sql <- do.call(SqlRender::loadRenderTranslateSql, params)
-      print(params[0])
+      
+      
 
       if (sqlOnly && sqlOnlyIncrementalInsert) {
-        # ParallelLogger::logInfo("D")
+
         checkQuery <- .createSqlOnlyQueries(
           params,
           check,
@@ -108,7 +113,7 @@
         )
         data.frame(query = checkQuery)
       } else if (sqlOnly) {
-        # ParallelLogger::logInfo("E")
+
         write(x = sql, file = file.path(
           outputFolder,
           sprintf("%s.sql", checkDescription$checkName)
@@ -121,7 +126,8 @@
           check = check,
           checkDescription = checkDescription,
           sql = sql,
-          outputFolder = outputFolder
+          outputFolder = outputFolder,
+          patEncSql = patEncSql
         )
       }
     })

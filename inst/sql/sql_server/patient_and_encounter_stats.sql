@@ -12,12 +12,12 @@ cohortDatabaseSchema = @cohortDatabaseSchema
 cohortTableName = @cohortTableName
 }
 XXXSAVE_FULL_RESULTXXX
-XXXQUERYNAME___@conceptStatsNotesXXX
+XXXQUERYNAME___@PatEncStatsNotesXXX
 **********/
 
 SELECT 
-	DISTINCT m.person_id as persons,
-	DISTINCT m.visit_occurrence_id as encounters
+	COUNT(DISTINCT m.person_id) as persons,
+	COUNT(DISTINCT m.visit_occurrence_id) as encounters
 
 FROM @cdmDatabaseSchema.VISIT_OCCURRENCE m
 	{@cohort}?{

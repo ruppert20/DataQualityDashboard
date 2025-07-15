@@ -323,7 +323,7 @@ executeDqChecks <- function(connectionDetails,
     # stats.csv
     statFileList = setdiff(list.files(path=outputFolder, pattern="*stats.csv$"), c(timeStatFileList, valueAsConceptStatFileList))
 
-    fileDict <= c("time_stats"=timeStatFileList,
+    fileDict <- c("time_stats"=timeStatFileList,
                   "value_as_concept_stats"=valueAsConceptStatFileList,
                   "stats"=statFileList)
 

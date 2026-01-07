@@ -457,66 +457,78 @@ executeDqChecks <- function(connectionDetails,
 #' @keywords internal
 #'
 .aggregateStatsCsvFiles <- function(outputFolder) {
-  # Find and aggregate *_stats.csv files (excluding value_as_concept and time stats)
+  # Find all *_stats.csv files (excluding time stats and previously aggregated files)
   statsFiles <- list.files(
     outputFolder,
     pattern = "_stats\\.csv$",
     full.names = TRUE
   )
-  # Exclude value_as_concept_stats and time_stats files
-  statsFiles <- statsFiles[!grepl("_value_as_concept_stats\\.csv$", statsFiles)]
+  # Exclude time_stats files and aggregated output files
   statsFiles <- statsFiles[!grepl("_time_stats\\.csv$", statsFiles)]
+  statsFiles <- statsFiles[!grepl("^aggregated_", basename(statsFiles))]
 
+  # Separate value_as_concept_stats files from other stats files
+  vacStatsFiles <- statsFiles[grepl("_value_as_concept_stats\\.csv$", statsFiles)]
+  statsFiles <- statsFiles[!grepl("_value_as_concept_stats\\.csv$", statsFiles)]
+
+  # Lists for classifying files
+  numericStatsList <- list()
+  conceptStatsList <- list()
+
+  # Process regular stats files - classify by checking if mean/median have non-NA values
   if (length(statsFiles) > 0) {
-    ParallelLogger::logInfo(sprintf("Aggregating %d stats CSV files", length(statsFiles)))
-    statsList <- lapply(statsFiles, function(f) {
+    ParallelLogger::logInfo(sprintf("Processing %d stats CSV files", length(statsFiles)))
+
+    for (f in statsFiles) {
       tryCatch({
         df <- read.csv(f, stringsAsFactors = FALSE)
-        # Add source file name as identifier
         df$source_file <- basename(f)
-        df
+
+        # Check if mean and median columns exist and have any non-NA values
+        hasNumericData <- FALSE
+        if ("mean" %in% names(df) && "median" %in% names(df)) {
+          hasNumericData <- any(!is.na(df$mean)) || any(!is.na(df$median))
+        }
+
+        if (hasNumericData) {
+          numericStatsList[[length(numericStatsList) + 1]] <- df
+        } else {
+          conceptStatsList[[length(conceptStatsList) + 1]] <- df
+        }
       }, error = function(e) {
         ParallelLogger::logWarn(sprintf("Could not read %s: %s", f, e$message))
-        NULL
       })
-    })
-    statsList <- statsList[!sapply(statsList, is.null)]
-    if (length(statsList) > 0) {
-      # Use bind_rows to handle different column structures
-      aggregatedStats <- dplyr::bind_rows(statsList)
-      aggregatedPath <- file.path(outputFolder, "aggregated_stats.csv")
-      write.csv(aggregatedStats, aggregatedPath, row.names = FALSE)
-      ParallelLogger::logInfo(sprintf("Wrote aggregated stats to %s", aggregatedPath))
     }
   }
 
-  # Find and aggregate *_value_as_concept_stats.csv files
-  vacStatsFiles <- list.files(
-    outputFolder,
-    pattern = "_value_as_concept_stats\\.csv$",
-    full.names = TRUE
-  )
-
+  # Process value_as_concept_stats files - add to concept stats list
   if (length(vacStatsFiles) > 0) {
-    ParallelLogger::logInfo(sprintf("Aggregating %d value_as_concept_stats CSV files", length(vacStatsFiles)))
-    vacStatsList <- lapply(vacStatsFiles, function(f) {
+    ParallelLogger::logInfo(sprintf("Processing %d value_as_concept_stats CSV files", length(vacStatsFiles)))
+
+    for (f in vacStatsFiles) {
       tryCatch({
         df <- read.csv(f, stringsAsFactors = FALSE)
-        # Add source file name as identifier
         df$source_file <- basename(f)
-        df
+        conceptStatsList[[length(conceptStatsList) + 1]] <- df
       }, error = function(e) {
         ParallelLogger::logWarn(sprintf("Could not read %s: %s", f, e$message))
-        NULL
       })
-    })
-    vacStatsList <- vacStatsList[!sapply(vacStatsList, is.null)]
-    if (length(vacStatsList) > 0) {
-      # Use bind_rows to handle different column structures
-      aggregatedVacStats <- dplyr::bind_rows(vacStatsList)
-      aggregatedVacPath <- file.path(outputFolder, "aggregated_value_as_concept_stats.csv")
-      write.csv(aggregatedVacStats, aggregatedVacPath, row.names = FALSE)
-      ParallelLogger::logInfo(sprintf("Wrote aggregated value_as_concept_stats to %s", aggregatedVacPath))
     }
+  }
+
+  # Write numeric stats if any
+  if (length(numericStatsList) > 0) {
+    aggregatedStats <- dplyr::bind_rows(numericStatsList)
+    aggregatedPath <- file.path(outputFolder, "aggregated_stats.csv")
+    write.csv(aggregatedStats, aggregatedPath, row.names = FALSE)
+    ParallelLogger::logInfo(sprintf("Wrote %d numeric stats files to %s", length(numericStatsList), aggregatedPath))
+  }
+
+  # Write concept stats (includes both concept-only stats and value_as_concept_stats)
+  if (length(conceptStatsList) > 0) {
+    aggregatedConceptStats <- dplyr::bind_rows(conceptStatsList)
+    aggregatedConceptPath <- file.path(outputFolder, "aggregated_value_as_concept_stats.csv")
+    write.csv(aggregatedConceptStats, aggregatedConceptPath, row.names = FALSE)
+    ParallelLogger::logInfo(sprintf("Wrote %d concept stats files to %s", length(conceptStatsList), aggregatedConceptPath))
   }
 }

@@ -41,6 +41,11 @@
 #'                                  with the fields cohort_definition_id and subject_id.
 #' @param cohortDatabaseSchema      The schema where the cohort table is located.
 #' @param cohortTableName           The name of the cohort table. Defaults to `cohort`.
+#' @param cohortFilterType          How to filter records by cohort dates. Options are:
+#'                                  - "PersonOnly": Filter only by person_id (no date filtering)
+#'                                  - "PersonDate": Filter by person_id AND date columns within cohort period
+#'                                  - "PersonDateTime": Filter by person_id AND datetime columns within cohort period
+#'                                  Default is "PersonOnly".
 #' @param tablesToExclude           (OPTIONAL) Choose which CDM tables to exclude from the execution.
 #' @param cdmVersion                The CDM version to target for the data source. Options are "5.2", "5.3", or "5.4". By default, "5.3" is used.
 #' @param tableCheckThresholdLoc    The location of the threshold file for evaluating the table checks. If not specified the default thresholds will be applied.
@@ -82,6 +87,7 @@ executeDqChecks <- function(connectionDetails,
                             cohortDefinitionId = c(),
                             cohortDatabaseSchema = resultsDatabaseSchema,
                             cohortTableName = "cohort",
+                            cohortFilterType = "PersonOnly",
                             tablesToExclude = c("CONCEPT", "VOCABULARY", "CONCEPT_ANCESTOR", "CONCEPT_RELATIONSHIP", "CONCEPT_CLASS", "CONCEPT_SYNONYM", "RELATIONSHIP", "DOMAIN"),
                             cdmVersion = "5.3",
                             tableCheckThresholdLoc = "default",
@@ -117,6 +123,10 @@ executeDqChecks <- function(connectionDetails,
          You passed in ', paste(checkSeverity, collapse = ", "))
   }
 
+  if (!cohortFilterType %in% c("PersonOnly", "PersonDate", "PersonDateTime")) {
+    stop('cohortFilterType must be one of "PersonOnly", "PersonDate", or "PersonDateTime". You passed in "', cohortFilterType, '"')
+  }
+
   stopifnot(
     is.null(checkNames) | is.character(checkNames),
     is.character(checkSeverity),
@@ -149,12 +159,36 @@ executeDqChecks <- function(connectionDetails,
       warning("The cdm_source table has more than 1 row. A single row from this table has been selected to populate DQD metadata.")
     }
     metadata$dqdVersion <- as.character(packageVersion("DataQualityDashboard"))
+
+    # Detect if cohort table has datetime columns (for PersonDateTime filtering)
+    cohortHasDatetime <- FALSE
+    if (length(cohortDefinitionId) > 0 && cohortFilterType == "PersonDateTime") {
+      cohortCols <- tryCatch({
+        DatabaseConnector::dbListFields(
+          conn = connection,
+          name = cohortTableName,
+          databaseSchema = cohortDatabaseSchema
+        )
+      }, error = function(e) {
+        ParallelLogger::logWarn(sprintf("Could not get cohort table columns: %s", e$message))
+        character(0)
+      })
+      cohortHasDatetime <- all(c("cohort_start_datetime", "cohort_end_datetime") %in% tolower(cohortCols))
+      if (cohortHasDatetime) {
+        ParallelLogger::logInfo("Detected cohort_start_datetime and cohort_end_datetime columns in cohort table")
+      } else {
+        ParallelLogger::logInfo("Cohort table uses date columns (cohort_start_date, cohort_end_date)")
+      }
+    }
+
     DatabaseConnector::disconnect(connection)
   } else {
     metadata <- data.frame(
       dqdVersion = as.character(packageVersion("DataQualityDashboard")),
       cdmSourceName = cdmSourceName
     )
+    # In sqlOnly mode, assume cohort table has datetime columns if PersonDateTime is used
+    cohortHasDatetime <- (cohortFilterType == "PersonDateTime")
   }
 
   # Setup output folder ------------------------------------------------------------------------------------------------------------
@@ -303,6 +337,9 @@ executeDqChecks <- function(connectionDetails,
     cohortDatabaseSchema,
     cohortTableName,
     cohortDefinitionId,
+    cohortFilterType,
+    cohortHasDatetime,
+    cdmVersion,
     outputFolder,
     sqlOnlyUnionCount,
     sqlOnlyIncrementalInsert,
@@ -353,6 +390,9 @@ executeDqChecks <- function(connectionDetails,
     }
 
     .writeResultsToJson(allResults, outputFolder, outputFile)
+
+    # Aggregate stats CSV files
+    .aggregateStatsCsvFiles(outputFolder)
 
     ParallelLogger::logInfo("Execution Complete")
   } else {
@@ -405,4 +445,78 @@ executeDqChecks <- function(connectionDetails,
     }
   }
   return(autoCommit)
+}
+
+#' Internal function to aggregate stats CSV files
+#'
+#' Combines individual *_stats.csv and *_value_as_concept_stats.csv files
+#' into aggregated files for easier analysis.
+#'
+#' @param outputFolder The folder containing the individual stats CSV files
+#'
+#' @keywords internal
+#'
+.aggregateStatsCsvFiles <- function(outputFolder) {
+  # Find and aggregate *_stats.csv files (excluding value_as_concept and time stats)
+  statsFiles <- list.files(
+    outputFolder,
+    pattern = "_stats\\.csv$",
+    full.names = TRUE
+  )
+  # Exclude value_as_concept_stats and time_stats files
+  statsFiles <- statsFiles[!grepl("_value_as_concept_stats\\.csv$", statsFiles)]
+  statsFiles <- statsFiles[!grepl("_time_stats\\.csv$", statsFiles)]
+
+  if (length(statsFiles) > 0) {
+    ParallelLogger::logInfo(sprintf("Aggregating %d stats CSV files", length(statsFiles)))
+    statsList <- lapply(statsFiles, function(f) {
+      tryCatch({
+        df <- read.csv(f, stringsAsFactors = FALSE)
+        # Add source file name as identifier
+        df$source_file <- basename(f)
+        df
+      }, error = function(e) {
+        ParallelLogger::logWarn(sprintf("Could not read %s: %s", f, e$message))
+        NULL
+      })
+    })
+    statsList <- statsList[!sapply(statsList, is.null)]
+    if (length(statsList) > 0) {
+      # Use bind_rows to handle different column structures
+      aggregatedStats <- dplyr::bind_rows(statsList)
+      aggregatedPath <- file.path(outputFolder, "aggregated_stats.csv")
+      write.csv(aggregatedStats, aggregatedPath, row.names = FALSE)
+      ParallelLogger::logInfo(sprintf("Wrote aggregated stats to %s", aggregatedPath))
+    }
+  }
+
+  # Find and aggregate *_value_as_concept_stats.csv files
+  vacStatsFiles <- list.files(
+    outputFolder,
+    pattern = "_value_as_concept_stats\\.csv$",
+    full.names = TRUE
+  )
+
+  if (length(vacStatsFiles) > 0) {
+    ParallelLogger::logInfo(sprintf("Aggregating %d value_as_concept_stats CSV files", length(vacStatsFiles)))
+    vacStatsList <- lapply(vacStatsFiles, function(f) {
+      tryCatch({
+        df <- read.csv(f, stringsAsFactors = FALSE)
+        # Add source file name as identifier
+        df$source_file <- basename(f)
+        df
+      }, error = function(e) {
+        ParallelLogger::logWarn(sprintf("Could not read %s: %s", f, e$message))
+        NULL
+      })
+    })
+    vacStatsList <- vacStatsList[!sapply(vacStatsList, is.null)]
+    if (length(vacStatsList) > 0) {
+      # Use bind_rows to handle different column structures
+      aggregatedVacStats <- dplyr::bind_rows(vacStatsList)
+      aggregatedVacPath <- file.path(outputFolder, "aggregated_value_as_concept_stats.csv")
+      write.csv(aggregatedVacStats, aggregatedVacPath, row.names = FALSE)
+      ParallelLogger::logInfo(sprintf("Wrote aggregated value_as_concept_stats to %s", aggregatedVacPath))
+    }
+  }
 }

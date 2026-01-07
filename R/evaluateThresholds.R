@@ -149,6 +149,14 @@
       thresholdValue <- eval(parse(text = thresholdFilter))
       notesValue <- eval(parse(text = notesFilter))
 
+      # Handle zero-length results (no matching row found in threshold file)
+      if (length(thresholdValue) == 0) {
+        thresholdValue <- NA
+      }
+      if (length(notesValue) == 0) {
+        notesValue <- NA
+      }
+
       checkResults[i, ]$thresholdValue <- thresholdValue
       checkResults[i, ]$notesValue <- notesValue
     }
@@ -166,11 +174,15 @@
       }
     } else if (is.na(thresholdValue) | thresholdValue == 0) {
       # If no threshold, or threshold is 0%, then any violating records will cause this check to fail
-      if (!is.na(checkResults[i, ]$numViolatedRows) & checkResults[i, ]$numViolatedRows > 0) {
+      numViolated <- checkResults[i, "numViolatedRows"]
+      if (length(numViolated) > 0 && !is.na(numViolated) && numViolated > 0) {
         checkResults[i, ]$failed <- 1
       }
-    } else if (checkResults[i, ]$pctViolatedRows * 100 > thresholdValue) {
-      checkResults[i, ]$failed <- 1
+    } else {
+      pctViolated <- checkResults[i, "pctViolatedRows"]
+      if (length(pctViolated) > 0 && !is.na(pctViolated) && pctViolated * 100 > thresholdValue) {
+        checkResults[i, ]$failed <- 1
+      }
     }
   }
 

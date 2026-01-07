@@ -10,11 +10,17 @@ cdmFieldName = @cdmFieldName
 conceptId = @conceptId
 unitConceptId = @unitConceptId
 plausibleValueHigh = @plausibleValueHigh
+dateColumn = @dateColumn
+datetimeColumn = @datetimeColumn
+endDateColumn = @endDateColumn (optional)
+cohortFilterType = @cohortFilterType (PersonOnly, PersonDate, PersonDateTime)
+cohortHasDatetime = @cohortHasDatetime (TRUE if cohort table has datetime columns)
 {@cohort}?{
 cohortDefinitionId = @cohortDefinitionId
 cohortDatabaseSchema = @cohortDatabaseSchema
 cohortTableName = @cohortTableName
 }
+additionalSQLFilters = @additionalSQLFilters (optional, additional WHERE clause conditions)
 **********/
 
 
@@ -44,6 +50,33 @@ FROM
 			AND m.unit_concept_id = @unitConceptId
 			AND m.value_as_number IS NOT NULL
 			AND m.value_as_number > @plausibleValueHigh
+			{@cohort & @cohortFilterType == 'PersonDate' & @endDateColumn != ''}?{
+				AND m.@dateColumn <= c.cohort_end_date
+				AND COALESCE(m.@endDateColumn, m.@dateColumn) >= c.cohort_start_date
+			}
+			{@cohort & @cohortFilterType == 'PersonDate' & @endDateColumn == ''}?{
+				AND m.@dateColumn >= c.cohort_start_date
+				AND m.@dateColumn <= c.cohort_end_date
+			}
+			{@cohort & @cohortFilterType == 'PersonDateTime' & @cohortHasDatetime & @endDateColumn != ''}?{
+				AND m.@datetimeColumn <= c.cohort_end_datetime
+				AND COALESCE(m.@endDateColumn, m.@dateColumn) >= c.cohort_start_datetime
+			}
+			{@cohort & @cohortFilterType == 'PersonDateTime' & @cohortHasDatetime & @endDateColumn == ''}?{
+				AND m.@datetimeColumn >= c.cohort_start_datetime
+				AND m.@datetimeColumn <= c.cohort_end_datetime
+			}
+			{@cohort & @cohortFilterType == 'PersonDateTime' & !@cohortHasDatetime & @endDateColumn != ''}?{
+				AND CAST(m.@datetimeColumn AS DATE) <= c.cohort_end_date
+				AND COALESCE(m.@endDateColumn, CAST(m.@datetimeColumn AS DATE)) >= c.cohort_start_date
+			}
+			{@cohort & @cohortFilterType == 'PersonDateTime' & !@cohortHasDatetime & @endDateColumn == ''}?{
+				AND CAST(m.@datetimeColumn AS DATE) >= c.cohort_start_date
+				AND CAST(m.@datetimeColumn AS DATE) <= c.cohort_end_date
+			}
+			{@additionalSQLFilters != '' & @additionalSQLFilters != 'NA'}?{
+				AND m.@additionalSQLFilters
+			}
 		/*violatedRowsEnd*/
 	) violated_rows
 ) violated_row_count,
@@ -59,5 +92,32 @@ FROM
 	WHERE m.@cdmFieldName = @conceptId
 		AND unit_concept_id = @unitConceptId
 		AND value_as_number IS NOT NULL
+		{@cohort & @cohortFilterType == 'PersonDate' & @endDateColumn != ''}?{
+			AND m.@dateColumn <= c.cohort_end_date
+			AND COALESCE(m.@endDateColumn, m.@dateColumn) >= c.cohort_start_date
+		}
+		{@cohort & @cohortFilterType == 'PersonDate' & @endDateColumn == ''}?{
+			AND m.@dateColumn >= c.cohort_start_date
+			AND m.@dateColumn <= c.cohort_end_date
+		}
+		{@cohort & @cohortFilterType == 'PersonDateTime' & @cohortHasDatetime & @endDateColumn != ''}?{
+			AND m.@datetimeColumn <= c.cohort_end_datetime
+			AND COALESCE(m.@endDateColumn, m.@dateColumn) >= c.cohort_start_datetime
+		}
+		{@cohort & @cohortFilterType == 'PersonDateTime' & @cohortHasDatetime & @endDateColumn == ''}?{
+			AND m.@datetimeColumn >= c.cohort_start_datetime
+			AND m.@datetimeColumn <= c.cohort_end_datetime
+		}
+		{@cohort & @cohortFilterType == 'PersonDateTime' & !@cohortHasDatetime & @endDateColumn != ''}?{
+			AND CAST(m.@datetimeColumn AS DATE) <= c.cohort_end_date
+			AND COALESCE(m.@endDateColumn, CAST(m.@datetimeColumn AS DATE)) >= c.cohort_start_date
+		}
+		{@cohort & @cohortFilterType == 'PersonDateTime' & !@cohortHasDatetime & @endDateColumn == ''}?{
+			AND CAST(m.@datetimeColumn AS DATE) >= c.cohort_start_date
+			AND CAST(m.@datetimeColumn AS DATE) <= c.cohort_end_date
+		}
+		{@additionalSQLFilters != '' & @additionalSQLFilters != 'NA'}?{
+			AND m.@additionalSQLFilters
+		}
 ) denominator
 ;

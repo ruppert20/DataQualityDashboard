@@ -29,6 +29,9 @@
 #' @param cohortDatabaseSchema      The schema where the cohort table is located.
 #' @param cohortTableName           The name of the cohort table.
 #' @param cohortDefinitionId        The cohort definition id for the cohort you wish to run the DQD on. The package assumes a standard OHDSI cohort table called 'Cohort'
+#' @param cohortFilterType          How to filter records by cohort dates (PersonOnly, PersonDate, PersonDateTime)
+#' @param cohortHasDatetime         Whether the cohort table has datetime columns (cohort_start_datetime, cohort_end_datetime)
+#' @param cdmVersion                The CDM version (e.g., "5.3", "5.4")
 #' @param outputFolder              The folder to output logs and SQL files to
 #' @param sqlOnlyUnionCount         (OPTIONAL) How many SQL commands to union before inserting them into output table (speeds processing when queries done in parallel). Default is 1.
 #' @param sqlOnlyIncrementalInsert  (OPTIONAL) Boolean to determine whether insert check results and associated metadata into output table.  Default is FALSE (for backwards compatability to <= v2.2.0)
@@ -53,6 +56,9 @@
                       cohortDatabaseSchema,
                       cohortTableName,
                       cohortDefinitionId,
+                      cohortFilterType,
+                      cohortHasDatetime,
+                      cdmVersion,
                       outputFolder,
                       sqlOnlyUnionCount,
                       sqlOnlyIncrementalInsert,
@@ -78,6 +84,10 @@
         setNames(check[c], c)
       })
 
+      # Get date columns for this table from configuration
+      tableName <- check["cdmTableName"]
+      dateColConfig <- .getDateColumns(tableName, cdmVersion)
+
       params <- c(
         list(dbms = connectionDetails$dbms),
         list(sqlFilename = checkDescription$sqlFile),
@@ -87,12 +97,23 @@
         list(cohortDatabaseSchema = cohortDatabaseSchema),
         list(cohortTableName = cohortTableName),
         list(cohortDefinitionId = cohortDefinitionId),
+        list(cohortFilterType = cohortFilterType),
+        list(cohortHasDatetime = cohortHasDatetime),
         list(vocabDatabaseSchema = vocabDatabaseSchema),
         list(cohort = cohort),
+        list(dateColumn = ifelse(is.na(dateColConfig$dateColumn), "", dateColConfig$dateColumn)),
+        list(datetimeColumn = ifelse(is.na(dateColConfig$datetimeColumn), dateColConfig$dateColumn, dateColConfig$datetimeColumn)),
+        list(endDateColumn = ifelse(is.na(dateColConfig$endDateColumn), "", dateColConfig$endDateColumn)),
+        list(endDatetimeColumn = ifelse(is.na(dateColConfig$endDatetimeColumn), "", dateColConfig$endDatetimeColumn)),
         unlist(columns, recursive = FALSE)
       )
 
       sql <- do.call(SqlRender::loadRenderTranslateSql, params)
+
+      # render the person/visit query
+      patEncParams <- params
+      patEncParams$sqlFilename <- "patient_and_encounter_stats.sql"
+      patEncSql <- do.call(SqlRender::loadRenderTranslateSql, patEncParams)
 
       if (sqlOnly && sqlOnlyIncrementalInsert) {
         checkQuery <- .createSqlOnlyQueries(
@@ -119,7 +140,9 @@
           check = check,
           checkDescription = checkDescription,
           sql = sql,
-          outputFolder = outputFolder
+          outputFolder = outputFolder,
+          patEncSql = patEncSql,
+          cdmVersion = cdmVersion
         )
       }
     })

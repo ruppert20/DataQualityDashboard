@@ -122,10 +122,12 @@ calculate_mode <- function(x) {
 
           repeat {
             # Build paginated query using SqlRender for cross-database compatibility
-            paginatedSql <- sprintf(
-              "SELECT * FROM (%s) paginated_query LIMIT %d OFFSET %d;",
-              baseQuery, batch_size, offset
-            )
+            paginatedSql <- SqlRender::render("SELECT * FROM (@baseQuery) paginated_query LIMIT @batch_size OFFSET @offset;",
+                                              baseQuery = baseQuery,
+                                              batch_size = batch_size,
+                                              offset = offset
+                                            )
+ 
             paginatedSql <- SqlRender::translate(paginatedSql, targetDialect = targetDialect)
 
             batch <- DatabaseConnector::querySql(

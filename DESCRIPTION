@@ -25,7 +25,7 @@ Depends:
     R (>= 3.2.2),
     DatabaseConnector (>= 2.0.2)
 Imports:
-    arrow,
+    Andromeda,
     DBI,
     magrittr,
     ParallelLogger,

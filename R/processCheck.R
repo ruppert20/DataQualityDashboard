@@ -24,7 +24,7 @@
 #' @param outputFolder              The folder to output logs and SQL files to.
 #' @param patEncSql                 The SQL for patient and encounter statistics
 #' @param cdmVersion                The CDM version (e.g., "5.3", "5.4")
-#' @param resume                    Whether to resume from existing parquet files
+#' @param resume                    Whether to resume from existing Andromeda files
 #'
 #' @return A dataframe containing the check results
 #'
@@ -92,107 +92,47 @@ calculate_mode <- function(x) {
 
         # define base file path
         baseFilePath <- file.path(outputFolder, check_name)
+        andromedaFile <- paste0(baseFilePath, ".andromeda")
 
-        parquetDir <- paste(baseFilePath, "parquet", sep='_')
-        metadataFile <- file.path(parquetDir, "_metadata")
-
-        if (resume & file.exists(metadataFile)) {
-          ParallelLogger::logInfo(sprintf("Resuming %s from parquet", check_name))
+        if (resume && file.exists(andromedaFile)) {
+          ParallelLogger::logInfo(sprintf("Resuming %s from Andromeda", check_name))
+          andromedaObject <- Andromeda::loadAndromeda(andromedaFile)
         } else {
-          # Create/clean parquet directory
-          if (dir.exists(parquetDir)) {
-            unlink(parquetDir, recursive = TRUE)
-          }
-          dir.create(parquetDir, recursive = TRUE)
-
           ParallelLogger::logInfo(sprintf("Running %s Query", check_name))
 
-          # Use database-side pagination to avoid loading entire result into JVM memory
-          batch_num <- 0
-          batch_size <- 500000  # rows per batch (~250MB assuming ~500 bytes/row)
-          total_rows <- 0
-          offset <- 0
+          # Use Andromeda to stream query results (handles memory efficiently)
+          andromedaObject <- Andromeda::andromeda()
 
-          # Get target DBMS for SQL translation
-          targetDialect <- connectionDetails$dbms
-
-          # Wrap query for pagination - use subquery to allow LIMIT/OFFSET
-          # Remove trailing semicolon if present for subquery wrapping
-          baseQuery <- sub(";\\s*$", "", querySQL)
-
-          repeat {
-            # Build paginated query using SqlRender for cross-database compatibility
-            paginatedSql <- SqlRender::render("SELECT * FROM (@baseQuery) paginated_query LIMIT @batch_size OFFSET @offset;",
-                                              baseQuery = baseQuery,
-                                              batch_size = batch_size,
-                                              offset = offset
-                                            )
- 
-            paginatedSql <- SqlRender::translate(paginatedSql, targetDialect = targetDialect)
-
-            batch <- DatabaseConnector::querySql(
-              connection = connection,
-              sql = paginatedSql,
-              snakeCaseToCamelCase = FALSE,
-              integer64AsNumeric = FALSE
-            )
-
-            if (nrow(batch) > 0) {
-              total_rows <- total_rows + nrow(batch)
-              arrow::write_parquet(
-                batch,
-                file.path(parquetDir, sprintf("batch_%04d.parquet", batch_num))
-              )
-              batch_num <- batch_num + 1
-              ParallelLogger::logInfo(sprintf("  Wrote batch %d (%d rows, %d total)", batch_num, nrow(batch), total_rows))
-
-              # If we got fewer rows than batch_size, we've reached the end
-              if (nrow(batch) < batch_size) {
-                break
-              }
-              offset <- offset + batch_size
-            } else {
-              # No rows returned
-              if (batch_num == 0) {
-                # Write empty parquet file with correct schema on first batch
-                arrow::write_parquet(
-                  batch,
-                  file.path(parquetDir, "batch_0000.parquet")
-                )
-              }
-              break
-            }
-          }
-
-          # Write _metadata file (standard Parquet dataset marker)
-          # Contains unified schema from all files - indicates successful completion
-          ds <- arrow::open_dataset(parquetDir)
-          arrow::write_parquet(
-            arrow::arrow_table(schema = ds$schema),
-            metadataFile
+          DatabaseConnector::querySqlToAndromeda(
+            connection = connection,
+            sql = querySQL,
+            andromeda = andromedaObject,
+            andromedaTableName = "query_result",
+            errorReportFile = errorReportFile,
+            snakeCaseToCamelCase = FALSE,
+            appendToTable = FALSE
           )
 
-          ParallelLogger::logInfo(sprintf("Finished writing %d rows to %d parquet files", total_rows, batch_num))
+          # Save Andromeda for resume capability
+          Andromeda::saveAndromeda(andromeda = andromedaObject,
+                                  fileName = andromedaFile,
+                                  maintainConnection = TRUE,
+                                  overwrite = TRUE)
+          ParallelLogger::logInfo(sprintf("  Query complete, data saved to Andromeda"))
         }
+        on.exit(Andromeda::close(andromedaObject), add = TRUE)
 
-        # Read parquet dataset (Arrow handles int64 correctly)
-        qData <- dplyr::collect(arrow::open_dataset(parquetDir))
-
-        # Convert int64 columns to character for consistent downstream processing
-        int64_cols <- c("measurement_concept_id", "person_id", "visit_occurrence_id",
-                        "unit_concept_id", "value_as_concept_id")
-        for (col in int64_cols) {
-          if (col %in% names(qData) && inherits(qData[[col]], "integer64")) {
-            qData[[col]] <- as.character(qData[[col]])
-          }
-        }
+        # Collect data from Andromeda into R for statistical calculations
+        # SQLite (Andromeda backend) doesn't support quantile, median, sd, mad functions
+        ParallelLogger::logInfo(sprintf("Collecting data from Andromeda for %s", check_name))
+        qData <- andromedaObject$query_result %>% dplyr::collect()
+        rowCount <- nrow(qData)
 
         if (grepl('VALUE_AS_NUMBER_CHECK', sql, TRUE)){
           # calculate stats
           ParallelLogger::logInfo(sprintf("Calculating Numeric summary for %s", check_name))
 
-          # Skip stats calculation if no data
-          if (nrow(qData) == 0) {
+          if (rowCount == 0) {
             ParallelLogger::logInfo(sprintf("No data found for %s, skipping stats calculation", check_name))
             qStats <- data.frame(
               measurement_concept_id = character(0),
@@ -218,6 +158,7 @@ calculate_mode <- function(x) {
               max_date = as.POSIXct(character(0))
             )
           } else {
+            # Compute statistics in R (data already collected from Andromeda)
             qStats <- rbind(qData %>%
                             dplyr::group_by(measurement_concept_id, unit_concept_id) %>%
                             dplyr::summarise(
@@ -265,7 +206,7 @@ calculate_mode <- function(x) {
                             ) %>% dplyr::ungroup() %>%
                             dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_')))
 
-            # calculate stats
+            # calculate value_as_concept stats
             ParallelLogger::logInfo(sprintf("Calculating Value as Concept summary for %s", check_name))
             write.csv(rbind(qData %>%
                             dplyr::group_by(measurement_concept_id, value_as_concept_id) %>%
@@ -289,14 +230,13 @@ calculate_mode <- function(x) {
                               max_date = max(measurement_datetime)
                             )%>%
                             dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_'), value_as_concept_id=NA)),
-                            paste(baseFilePath, 'value_as_concept_stats.csv', sep='_'), row.names = FALSE)
+                        paste(baseFilePath, 'value_as_concept_stats.csv', sep='_'), row.names = FALSE)
           }
         } else if (grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)){
           # calculate stats
           ParallelLogger::logInfo(sprintf("Calculating Concept summary for %s", check_name))
 
-          # Skip stats calculation if no data
-          if (nrow(qData) == 0) {
+          if (rowCount == 0) {
             ParallelLogger::logInfo(sprintf("No data found for %s, skipping stats calculation", check_name))
             qStats <- data.frame(
               measurement_concept_id = character(0),
@@ -309,6 +249,7 @@ calculate_mode <- function(x) {
               max_date = as.POSIXct(character(0))
             )
           } else {
+            # Compute statistics in R (data already collected from Andromeda)
             qStats <- rbind(qData %>%
                             dplyr::group_by(measurement_concept_id) %>%
                             dplyr::summarise(
@@ -334,8 +275,8 @@ calculate_mode <- function(x) {
         }
 
         # Only save files if we have data
-        if (nrow(qData) > 0) {
-          # create table of Values over time
+        if (rowCount > 0) {
+          # create table of Values over time (data already collected from Andromeda)
           hist_data <- qData %>%
             dplyr::arrange(measurement_datetime) %>%
             dplyr::mutate(month = format(measurement_datetime, "%m"), year = format(measurement_datetime, "%Y")) %>%

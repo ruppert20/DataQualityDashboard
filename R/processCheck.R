@@ -107,51 +107,60 @@ calculate_mode <- function(x) {
 
           ParallelLogger::logInfo(sprintf("Running %s Query", check_name))
 
-          # Stream query results to parquet files in batches
-          # This avoids the bit64/RSQLite corruption issue entirely
-          rs <- DatabaseConnector::dbSendQuery(connection, querySQL)
-          on.exit(DBI::dbClearResult(rs), add = TRUE)
-
+          # Use database-side pagination to avoid loading entire result into JVM memory
           batch_num <- 0
-          batch_size <- 100000  # rows per batch
+          batch_size <- 500000  # rows per batch (~250MB assuming ~500 bytes/row)
           total_rows <- 0
+          offset <- 0
 
-          # Fetch first batch to get schema
-          first_batch <- DBI::dbFetch(rs, n = batch_size)
+          # Get target DBMS for SQL translation
+          targetDialect <- connectionDetails$dbms
 
-          if (nrow(first_batch) > 0) {
-            # Write first batch
-            total_rows <- nrow(first_batch)
-            arrow::write_parquet(
-              first_batch,
-              file.path(parquetDir, sprintf("batch_%04d.parquet", batch_num))
+          # Wrap query for pagination - use subquery to allow LIMIT/OFFSET
+          # Remove trailing semicolon if present for subquery wrapping
+          baseQuery <- sub(";\\s*$", "", querySQL)
+
+          repeat {
+            # Build paginated query using SqlRender for cross-database compatibility
+            paginatedSql <- sprintf(
+              "SELECT * FROM (%s) paginated_query LIMIT %d OFFSET %d;",
+              baseQuery, batch_size, offset
             )
-            batch_num <- batch_num + 1
-            ParallelLogger::logInfo(sprintf("  Wrote batch %d (%d rows total)", batch_num, total_rows))
+            paginatedSql <- SqlRender::translate(paginatedSql, targetDialect = targetDialect)
 
-            # Continue with remaining batches
-            while (!DBI::dbHasCompleted(rs)) {
-              batch <- DBI::dbFetch(rs, n = batch_size)
-              if (nrow(batch) > 0) {
-                total_rows <- total_rows + nrow(batch)
+            batch <- DatabaseConnector::querySql(
+              connection = connection,
+              sql = paginatedSql,
+              snakeCaseToCamelCase = FALSE,
+              integer64AsNumeric = FALSE
+            )
+
+            if (nrow(batch) > 0) {
+              total_rows <- total_rows + nrow(batch)
+              arrow::write_parquet(
+                batch,
+                file.path(parquetDir, sprintf("batch_%04d.parquet", batch_num))
+              )
+              batch_num <- batch_num + 1
+              ParallelLogger::logInfo(sprintf("  Wrote batch %d (%d rows, %d total)", batch_num, nrow(batch), total_rows))
+
+              # If we got fewer rows than batch_size, we've reached the end
+              if (nrow(batch) < batch_size) {
+                break
+              }
+              offset <- offset + batch_size
+            } else {
+              # No rows returned
+              if (batch_num == 0) {
+                # Write empty parquet file with correct schema on first batch
                 arrow::write_parquet(
                   batch,
-                  file.path(parquetDir, sprintf("batch_%04d.parquet", batch_num))
+                  file.path(parquetDir, "batch_0000.parquet")
                 )
-                batch_num <- batch_num + 1
-                ParallelLogger::logInfo(sprintf("  Wrote batch %d (%d rows total)", batch_num, total_rows))
               }
+              break
             }
-          } else {
-            # Write empty parquet file with correct schema
-            arrow::write_parquet(
-              first_batch,
-              file.path(parquetDir, "batch_0000.parquet")
-            )
           }
-
-          DBI::dbClearResult(rs)
-          on.exit(NULL, add = FALSE)  # Remove the on.exit since we've already cleared
 
           # Write _metadata file (standard Parquet dataset marker)
           # Contains unified schema from all files - indicates successful completion

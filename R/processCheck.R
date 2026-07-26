@@ -39,6 +39,41 @@ calculate_mode <- function(x) {
   as.numeric(names(modes)[which.max(modes)])
 }
 
+#' Flatten a possibly chained condition into a single-line message.
+#'
+#' rlang and dplyr wrap errors so that conditionMessage() returns only the
+#' outermost frame (e.g. "In argument: `month = format(...)`") while the actual
+#' cause is held in $parent. Logging only the outer message discards the reason
+#' the check failed. Walks the whole chain and collapses it onto one line so it
+#' stays readable in the tab-delimited ParallelLogger output.
+#'
+#' @param e   A condition object
+#'
+#' @return A single-line character string containing the full cause chain
+#'
+#' @keywords internal
+#'
+.flattenConditionMessage <- function(e) {
+  msgs <- character(0)
+  cnd <- e
+  while (inherits(cnd, "condition")) {
+    msg <- tryCatch(conditionMessage(cnd), error = function(...) NULL)
+    if (length(msg) > 0 && any(nzchar(msg))) {
+      msg <- trimws(gsub("\\s+", " ", paste(msg, collapse = " ")))
+      # conditionMessage() on an rlang error already renders the whole chain, so
+      # only append a parent that adds something the outer message did not say
+      if (nzchar(msg) && !any(grepl(msg, msgs, fixed = TRUE))) {
+        msgs <- c(msgs, msg)
+      }
+    }
+    cnd <- cnd$parent
+  }
+  if (length(msgs) == 0) {
+    return("<no condition message>")
+  }
+  paste(msgs, collapse = " Caused by: ")
+}
+
 .processCheck <- function(connection,
                           connectionDetails,
                           check,
@@ -276,22 +311,28 @@ calculate_mode <- function(x) {
 
         # Only save files if we have data
         if (rowCount > 0) {
-          # create table of Values over time (data already collected from Andromeda)
-          hist_data <- qData %>%
-            dplyr::arrange(measurement_datetime) %>%
-            dplyr::mutate(month = format(measurement_datetime, "%m"), year = format(measurement_datetime, "%Y")) %>%
-            dplyr::group_by(year, month) %>%
-            dplyr::mutate(num_meas = dplyr::n()) %>%
-            dplyr::distinct(year, month, num_meas) %>%
-            dplyr::ungroup() %>%
-            dplyr::arrange(year, month) %>%
-            dplyr::collect()
-
           # save results
           ParallelLogger::logInfo(sprintf("Saving %s Summary Files", check_name))
           if (grepl('VALUE_AS_CONCEPT_CHECK', sql, TRUE) | grepl('VALUE_AS_NUMBER_CHECK', sql, TRUE) | grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)){
             write.csv(qStats, paste(baseFilePath, 'stats.csv', sep='_'), row.names = FALSE)
           }
+
+          # create table of Values over time
+          # aggregated in the database rather than over the collected qData: each
+          # format() call on a POSIXct column expands to an 11 component POSIXlt of
+          # the full row count, which exhausts memory on the largest tables. The
+          # database returns one row per month instead. strftime() keeps the same
+          # zero-padded character year/month the previous format() calls produced.
+          hist_data <- andromedaObject$query_result %>%
+            dplyr::mutate(
+              year = strftime(measurement_datetime, "%Y"),
+              month = strftime(measurement_datetime, "%m")
+            ) %>%
+            dplyr::count(year, month, name = "num_meas") %>%
+            dplyr::arrange(year, month) %>%
+            dplyr::collect() %>%
+            dplyr::mutate(num_meas = as.integer(num_meas)) %>%
+            as.data.frame()
 
           write.csv(hist_data, paste(baseFilePath, 'time_stats.csv', sep='_'), row.names = FALSE)
         }
@@ -330,14 +371,15 @@ calculate_mode <- function(x) {
       return(.recordResult(check = check, checkDescription = checkDescription, sql = sql, warning = w$message))
     },
     error = function(e) {
+      errorMessage <- .flattenConditionMessage(e)
       ParallelLogger::logError(sprintf(
         "[Level: %s] [Check: %s] [CDM Table: %s] [CDM Field: %s] %s",
         checkDescription$checkLevel,
         checkDescription$checkName,
         check["cdmTableName"],
-        check["cdmFieldName"], e$message
+        check["cdmFieldName"], errorMessage
       ))
-      return(.recordResult(check = check, checkDescription = checkDescription, sql = sql, error = e$message))
+      return(.recordResult(check = check, checkDescription = checkDescription, sql = sql, error = errorMessage))
     }
   )
 }

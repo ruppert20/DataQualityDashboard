@@ -102,7 +102,7 @@ checkLevels <- c("TABLE", "FIELD", "CONCEPT")
 checkNames <- c() # Names can be found in inst/csv/OMOP_CDM_v5.3_Check_Descriptions.csv
 
 # which DQ severity levels to run? ----------------------------
-checkSeverity <- c("fatal", "convention", "characterization") 
+checkSeverity <- c("fatal", "convention", "characterization")
 
 # want to EXCLUDE a pre-specified list of checks? run the following code:
 #
@@ -115,14 +115,23 @@ checkSeverity <- c("fatal", "convention", "characterization")
 # which CDM tables to exclude? ------------------------------------
 tablesToExclude <- c("CONCEPT", "VOCABULARY", "CONCEPT_ANCESTOR", "CONCEPT_RELATIONSHIP", "CONCEPT_CLASS", "CONCEPT_SYNONYM", "RELATIONSHIP", "DOMAIN") # list of CDM table names to skip evaluating checks against; by default DQD excludes the vocab tables
 
+# (OPTIONAL) cohort-based DQD settings ----------------------------------------------------------------
+cohortDefinitionId <- c() # set to a cohort ID to restrict DQD to a specific cohort
+cohortDatabaseSchema <- resultsDatabaseSchema # schema containing the cohort table
+cohortTableName <- "cohort" # name of the cohort table
+cohortFilterType <- "PersonOnly" # options: "PersonOnly", "PersonDate", "PersonDateTime"
+# "PersonOnly" = filter by person_id only (default)
+# "PersonDate" = filter by person_id AND date overlap with cohort period
+# "PersonDateTime" = filter by person_id AND datetime overlap with cohort period
+
 # run the job --------------------------------------------------------------------------------------
-DataQualityDashboard::executeDqChecks(connectionDetails = connectionDetails, 
-                              cdmDatabaseSchema = cdmDatabaseSchema, 
+DataQualityDashboard::executeDqChecks(connectionDetails = connectionDetails,
+                              cdmDatabaseSchema = cdmDatabaseSchema,
                               resultsDatabaseSchema = resultsDatabaseSchema,
-                              cdmSourceName = cdmSourceName, 
+                              cdmSourceName = cdmSourceName,
                               cdmVersion = cdmVersion,
                               numThreads = numThreads,
-                              sqlOnly = sqlOnly, 
+                              sqlOnly = sqlOnly,
                               sqlOnlyUnionCount = sqlOnlyUnionCount,
                               sqlOnlyIncrementalInsert = sqlOnlyIncrementalInsert,
                               outputFolder = outputFolder,
@@ -132,7 +141,11 @@ DataQualityDashboard::executeDqChecks(connectionDetails = connectionDetails,
                               writeToCsv = writeToCsv,
                               csvFile = csvFile,
                               checkLevels = checkLevels,
-			      checkSeverity = checkSeverity,
+                              checkSeverity = checkSeverity,
+                              cohortDefinitionId = cohortDefinitionId,
+                              cohortDatabaseSchema = cohortDatabaseSchema,
+                              cohortTableName = cohortTableName,
+                              cohortFilterType = cohortFilterType,
                               tablesToExclude = tablesToExclude,
                               checkNames = checkNames)
 

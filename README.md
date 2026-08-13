@@ -44,7 +44,10 @@ Features
 ========
 - Utilizes configurable data check thresholds
 - Analyzes data in the OMOP Common Data Model format for all data checks
-- Produces a set of data check results with supplemental investigation assets.
+- Produces a set of data check results with supplemental investigation assets
+- Supports cohort-based analysis with configurable date filtering (`PersonOnly`, `PersonDate`, `PersonDateTime`)
+- Concept-level statistics checks (numeric distributions, concept census) with memory-efficient Andromeda-based data streaming
+- Per-concept SQL filter support via `additionalSQLFilters` in concept-level threshold CSVs
 
 Data Requirements
 =================
@@ -71,7 +74,7 @@ DataQualityDashboard is an R package
 
 System Requirements
 ===================
-Requires R (version 3.2.2 or higher). Requires [DatabaseConnector](https://github.com/OHDSI/DatabaseConnector) (version 2.0.2 or higher).
+Requires R (version 3.2.2 or higher). Requires [DatabaseConnector](https://github.com/OHDSI/DatabaseConnector) (version 2.0.2 or higher). The concept-level statistics checks use [Andromeda](https://github.com/OHDSI/Andromeda) to stream large query results to disk rather than holding them in memory.
 
 A variety of database platforms are supported, as documented [here](https://ohdsi.github.io/Hades/supportedPlatforms.html). 
 

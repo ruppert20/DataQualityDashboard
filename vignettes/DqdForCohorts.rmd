@@ -15,27 +15,91 @@ vignette: >
   %\VignetteEngine{knitr::knitr}
 ---
 
-Running the Data Quality Dashboard for a cohort is fairly straightforward. There are two options in the `executeDqChecks` function, `cohortDefinitionId` and `cohortDatabaseSchema`. These options will point the DQD to the schema where the cohort table is located and provide the id of the cohort on which the DQD will be run. By default, the tool assumes that the table being referenced is the standard OHDSI cohort table named **COHORT** with at least the columns **cohort_definition_id** and **subject_id**. For example, if I have a cohort number 123 and the cohort is in the *results* schema of the *IBM_CCAE* database, the `executeDqChecks` function would look like this:
+Running the Data Quality Dashboard for a cohort is fairly straightforward. The `executeDqChecks` function provides several cohort-related parameters:
+
+- **`cohortDefinitionId`**: The cohort definition ID to filter on.
+- **`cohortDatabaseSchema`**: The schema where the cohort table is located (defaults to `resultsDatabaseSchema`).
+- **`cohortTableName`**: The name of the cohort table (defaults to `"cohort"`).
+- **`cohortFilterType`**: How to filter CDM records by cohort dates (see below).
+
+By default, the tool assumes that the table being referenced is a standard OHDSI cohort table with at least the columns **cohort_definition_id** and **subject_id**.
+
+# Basic Usage
+
+For example, if you have a cohort number 123 and the cohort is in the *results* schema of the *IBM_CCAE* database, the `executeDqChecks` function would look like this:
 
   ```r
-  
-  DataQualityDashboard::executeDqChecks(connectionDetails = connectionDetails, 
-                                      cdmDatabaseSchema = cdmDatabaseSchema, 
+
+  DataQualityDashboard::executeDqChecks(connectionDetails = connectionDetails,
+                                      cdmDatabaseSchema = cdmDatabaseSchema,
                                       resultsDatabaseSchema = resultsDatabaseSchema,
                                       cdmSourceName = "IBM_CCAE_cohort_123",
                                       cohortDefinitionId = 123,
                                       cohortDatabaseSchema = "IBM_CCAE.results",
                                       cohortTableName = "cohort",
                                       numThreads = numThreads,
-                                      sqlOnly = sqlOnly, 
-                                      outputFolder = outputFolder, 
+                                      sqlOnly = sqlOnly,
+                                      outputFolder = outputFolder,
                                       verboseMode = verboseMode,
                                       writeToTable = writeToTable,
                                       writeTableName = "dqdashboard_results_123",
                                       checkLevels = checkLevels,
                                       tablesToExclude = tablesToExclude,
                                       checkNames = checkNames)
-                                      
- ``` 
- 
+
+ ```
+
  As a note, it is good practice to have the `cdmSourceName` option and the `writeTableName` option reflect the name of the cohort so that the results don't get confused with those of the entire database.
+
+# Cohort Date Filtering with `cohortFilterType`
+
+By default, cohort-based DQD runs filter CDM records by person only (i.e., any record belonging to a person in the cohort is included, regardless of dates). The `cohortFilterType` parameter allows you to also filter records by their overlap with the cohort period. There are three options:
+
+- **`"PersonOnly"`** (default): Filter only by `person_id`. All records for persons in the cohort are included regardless of dates.
+- **`"PersonDate"`**: Filter by `person_id` AND require that the record's date columns overlap with the cohort period (`cohort_start_date` to `cohort_end_date`). For tables with both start and end date columns (e.g., `drug_exposure_start_date` / `drug_exposure_end_date`), interval intersection logic is used so that partially overlapping records are included.
+- **`"PersonDateTime"`**: Same as `PersonDate`, but uses datetime columns for higher precision (e.g., `measurement_datetime`). If the cohort table has `cohort_start_datetime` and `cohort_end_datetime` columns, those are used; otherwise, the datetime values are cast to dates and compared against `cohort_start_date` / `cohort_end_date`.
+
+The date and datetime columns used for each CDM table are defined in the `inst/csv/OMOP_CDMv{version}_Date_Columns.csv` configuration file.
+
+## Example with Date Filtering
+
+```r
+
+DataQualityDashboard::executeDqChecks(connectionDetails = connectionDetails,
+                                    cdmDatabaseSchema = cdmDatabaseSchema,
+                                    resultsDatabaseSchema = resultsDatabaseSchema,
+                                    cdmSourceName = "IBM_CCAE_cohort_123",
+                                    cohortDefinitionId = 123,
+                                    cohortDatabaseSchema = "IBM_CCAE.results",
+                                    cohortTableName = "cohort",
+                                    cohortFilterType = "PersonDate",
+                                    numThreads = numThreads,
+                                    sqlOnly = sqlOnly,
+                                    outputFolder = outputFolder,
+                                    verboseMode = verboseMode,
+                                    writeToTable = writeToTable,
+                                    writeTableName = "dqdashboard_results_123",
+                                    checkLevels = checkLevels,
+                                    tablesToExclude = tablesToExclude,
+                                    checkNames = checkNames)
+
+```
+
+# Concept-Level Statistics Checks
+
+When running concept-level checks (`conceptStats`, `numericStats`), the DQD can produce detailed statistics for measurement concepts. These checks:
+
+- Stream query results to **Andromeda** (an on-disk SQLite-backed data store) to handle large result sets without exhausting memory.
+- Compute summary statistics in R (mean, median, percentiles, standard deviation, etc.) grouped by concept and unit.
+- Save results to CSV files in the output folder:
+    - `*_stats.csv` — static per-concept summary. For `numericStats` (`VALUE_AS_NUMBER_CHECK`) grouped by `(measurement_concept_id, unit_concept_id)` with the full distributional stats (min, percentile_5/25/75/95, median, mean, mode, max, standard_deviation, median_absolute_deviation). For `conceptStats` (`CONCEPT_CENSUS_CHECK`) grouped by `measurement_concept_id` with counts only.
+    - `*_value_as_concept_stats.csv` — for `numericStats` only; counts grouped by `(measurement_concept_id, value_as_concept_id)`.
+    - `*_numeric_time_stats.csv` — for `numericStats` only; monthly stats grouped by `(measurement_concept_id, unit_concept_id, year, month)` with `num_meas`, `min`, `mean`, `max`, `standard_deviation`, plus an "overall" roll-up per `(unit_concept_id, year, month)`. Aggregated in the database (SQLite via Andromeda); `standard_deviation` uses the sum-of-squares formula since SQLite has no `STDDEV`.
+    - `*_concept_time_stats.csv` — for `conceptStats` only; monthly counts grouped by `(measurement_concept_id, year, month)`.
+- Aggregate individual `*_stats.csv` and `*_value_as_concept_stats.csv` files into `aggregated_stats.csv` and `aggregated_value_as_concept_stats.csv` at the end of execution. Time-stats files (`*_numeric_time_stats.csv`, `*_concept_time_stats.csv`) are left as per-check files.
+
+Andromeda files (`.andromeda`) are saved to the output folder. If a run is interrupted, setting `resume = TRUE` (the default in `.processCheck`) allows the DQD to skip re-running queries for which Andromeda files already exist.
+
+# Additional SQL Filters
+
+Concept-level checks support an `additionalSQLFilters` column in the concept-level threshold CSV files (`inst/csv/OMOP_CDMv{version}_Concept_Level.csv`). This allows per-concept SQL filter conditions to be injected into the WHERE clause. For example, drug exposure checks may include a filter like `route_concept_id IN (4112421, 4171047, ...)` to restrict analysis to specific administration routes. These filters are applied consistently across all concept-level SQL templates, including the Andromeda-based stats checks.

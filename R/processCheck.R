@@ -321,20 +321,75 @@ calculate_mode <- function(x) {
           # aggregated in the database rather than over the collected qData: each
           # format() call on a POSIXct column expands to an 11 component POSIXlt of
           # the full row count, which exhausts memory on the largest tables. The
-          # database returns one row per month instead. strftime() keeps the same
-          # zero-padded character year/month the previous format() calls produced.
-          hist_data <- andromedaObject$query_result %>%
+          # database returns one row per group instead. strftime() keeps a
+          # zero-padded character year/month.
+          timeQuery <- andromedaObject$query_result %>%
             dplyr::mutate(
               year = strftime(measurement_datetime, "%Y"),
               month = strftime(measurement_datetime, "%m")
-            ) %>%
-            dplyr::count(year, month, name = "num_meas") %>%
-            dplyr::arrange(year, month) %>%
-            dplyr::collect() %>%
-            dplyr::mutate(num_meas = as.integer(num_meas)) %>%
-            as.data.frame()
+            )
 
-          write.csv(hist_data, paste(baseFilePath, 'time_stats.csv', sep='_'), row.names = FALSE)
+          if (grepl('VALUE_AS_NUMBER_CHECK', sql, TRUE)) {
+            ParallelLogger::logInfo(sprintf("Calculating Numeric Time Stats for %s", check_name))
+            # standard_deviation is derived from sum(x) and sum(x*x) so the whole
+            # aggregation stays in SQLite (no quantile/sd support there) and the
+            # collected result is one row per (concept, unit, year, month).
+            numeric_time_stats <- dplyr::bind_rows(
+              timeQuery %>%
+                dplyr::group_by(measurement_concept_id, unit_concept_id, year, month) %>%
+                dplyr::summarise(
+                  num_meas = dplyr::n(),
+                  min = min(value_as_number, na.rm = TRUE),
+                  mean = mean(value_as_number, na.rm = TRUE),
+                  max = max(value_as_number, na.rm = TRUE),
+                  sum_x = sum(value_as_number, na.rm = TRUE),
+                  sum_xx = sum(value_as_number * value_as_number, na.rm = TRUE),
+                  n_val = sum(!is.na(value_as_number))
+                ) %>%
+                dplyr::ungroup() %>%
+                dplyr::collect(),
+              timeQuery %>%
+                dplyr::group_by(unit_concept_id, year, month) %>%
+                dplyr::summarise(
+                  num_meas = dplyr::n(),
+                  min = min(value_as_number, na.rm = TRUE),
+                  mean = mean(value_as_number, na.rm = TRUE),
+                  max = max(value_as_number, na.rm = TRUE),
+                  sum_x = sum(value_as_number, na.rm = TRUE),
+                  sum_xx = sum(value_as_number * value_as_number, na.rm = TRUE),
+                  n_val = sum(!is.na(value_as_number))
+                ) %>%
+                dplyr::ungroup() %>%
+                dplyr::collect() %>%
+                dplyr::mutate(measurement_concept_id = paste(check_name, "overall", sep = "_"))
+            ) %>%
+              dplyr::mutate(
+                # pmax(., 0) guards against tiny negative values from floating-point
+                # cancellation in sum_xx - sum_x^2/n
+                standard_deviation = ifelse(
+                  n_val > 1,
+                  sqrt(pmax((sum_xx - (sum_x * sum_x) / n_val) / (n_val - 1), 0)),
+                  NA_real_
+                ),
+                num_meas = as.integer(num_meas)
+              ) %>%
+              dplyr::select(measurement_concept_id, unit_concept_id, year, month,
+                            num_meas, min, mean, max, standard_deviation) %>%
+              dplyr::arrange(measurement_concept_id, unit_concept_id, year, month) %>%
+              as.data.frame()
+
+            write.csv(numeric_time_stats, paste(baseFilePath, 'numeric_time_stats.csv', sep = '_'), row.names = FALSE)
+          } else if (grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)) {
+            ParallelLogger::logInfo(sprintf("Calculating Concept Time Stats for %s", check_name))
+            concept_time_stats <- timeQuery %>%
+              dplyr::count(measurement_concept_id, year, month, name = "num_meas") %>%
+              dplyr::arrange(measurement_concept_id, year, month) %>%
+              dplyr::collect() %>%
+              dplyr::mutate(num_meas = as.integer(num_meas)) %>%
+              as.data.frame()
+
+            write.csv(concept_time_stats, paste(baseFilePath, 'concept_time_stats.csv', sep = '_'), row.names = FALSE)
+          }
         }
 
         # create output to match expected output (match recordResult.R)

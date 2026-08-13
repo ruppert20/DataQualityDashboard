@@ -347,7 +347,10 @@ calculate_mode <- function(x) {
                   n_val = sum(!is.na(value_as_number))
                 ) %>%
                 dplyr::ungroup() %>%
-                dplyr::collect(),
+                dplyr::collect() %>%
+                # the overall rows below carry a synthetic character id, and
+                # bind_rows() will not combine <double> with <character>
+                dplyr::mutate(measurement_concept_id = as.character(measurement_concept_id)),
               timeQuery %>%
                 dplyr::group_by(unit_concept_id, year, month) %>%
                 dplyr::summarise(

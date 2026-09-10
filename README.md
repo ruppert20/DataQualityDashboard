@@ -48,6 +48,7 @@ Features
 - Supports cohort-based analysis with configurable date filtering (`PersonOnly`, `PersonDate`, `PersonDateTime`)
 - Concept-level statistics checks (numeric distributions, concept census) with memory-efficient Andromeda-based data streaming
 - Per-concept SQL filter support via `additionalSQLFilters` in concept-level threshold CSVs
+- Automated temporal drift analysis for numeric concepts (PSI, Wasserstein, Jensen-Shannon divergence vs. origin and rolling-regime baselines; Bayesian changepoint regime detection with per-regime duration). See the [DataDrift vignette](vignettes/DataDrift.rmd) for interpretation and output schema.
 
 Data Requirements
 =================

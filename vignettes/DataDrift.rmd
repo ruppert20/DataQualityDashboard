@@ -1,0 +1,210 @@
+---
+title: "Temporal Data Drift Analysis"
+author: "DataQualityDashboard contributors"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: true
+    toc: true
+  html_document:
+    number_sections: true
+    toc: true
+vignette: >
+  %\VignetteIndexEntry{Temporal Data Drift Analysis}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::knitr}
+---
+
+# Overview
+
+The `computeDrift` extension runs alongside the existing numeric_stats check
+and analyzes how the distribution of `value_as_number` changes over time for
+every (concept, unit) combination. The goal is to move data quality checks
+beyond pass/fail thresholds toward automated pattern detection — identifying
+when a data source starts to drift, whether the drift is a transient anomaly
+or a persistent baseline shift, and quantifying the magnitude of change.
+
+Drift is enabled by default via the `computeDrift = TRUE` argument on
+`executeDqChecks()`. It reuses the same collected Andromeda frame that
+numeric_stats already streams from the CDM, so **no additional warehouse
+queries are issued** — the incremental cost is local R computation only.
+
+To disable:
+
+```r
+executeDqChecks(..., computeDrift = FALSE)
+```
+
+# Methods
+
+For each (concept, unit) group, values are bucketed by calendar month.
+Months with fewer than 30 observations are marked `insufficient_data` and
+excluded from drift computation (but retained in the output with NA metrics).
+
+## Origin baseline
+
+The origin baseline is the pooled distribution of values from the first
+12 months meeting the sample-size floor. Ten quantile-based bin edges are
+computed from origin values, extended with `-Inf` and `+Inf` sentinels so
+future months whose values fall outside the origin range are still counted.
+
+## Rolling regime baseline
+
+Bayesian changepoint detection (`bcp::bcp`) runs on the bivariate series of
+monthly mean and standard deviation. It returns a posterior probability at
+each month that a regime change occurred, and months are segmented into
+regimes at posterior > 0.5. For each regime, a pooled histogram over the
+regime's months serves as the "current normal" baseline.
+
+Because `bcp`'s convention is that `posterior.prob[i]` is the probability of
+a change *between* month *i* and *i+1*, the `is_regime_start` flag is derived
+from a one-position lag on the posterior series. The raw `bcp_posterior`
+column preserves bcp's original semantics.
+
+## Distributional metrics
+
+Three complementary metrics are computed for every eligible month, once
+against the origin baseline and once against the current regime baseline:
+
+- **PSI (Population Stability Index)** — sum over bins of
+  `(actual - expected) * ln(actual / expected)`. Natural-log convention.
+  Bounded below by 0; identical distributions give 0. Small ε = 1e-6
+  substituted for zero bins. Industry rules of thumb: PSI < 0.1 stable,
+  0.1–0.25 moderate drift, > 0.25 significant drift.
+- **Wasserstein-1 distance** — via `transport::wasserstein1d`, computed on
+  raw values (not on binned histograms). Value is in the original units of
+  the measurement, so a Wasserstein of 3.2 mg/dL is immediately
+  interpretable.
+- **Jensen-Shannon divergence** — via `philentropy::JSD` in log2 units, so
+  the value is bounded in [0, 1]. This is the metric underlying
+  Sáez et al.'s `EHRtemporalVariability` package, so JSD scores are
+  directly comparable to the temporal maps that package produces.
+
+## Anomaly detection
+
+A month is flagged as `is_anomaly = TRUE` when its `psi_current`
+(vs. its own regime's baseline) exceeds the PSI threshold *and* the month
+is not itself a regime start. Regime starts are excluded because they
+are already captured in the regime change list.
+
+A transient one-month spike (e.g., an ETL error affecting a single month
+that reverts the following month) typically appears as a very short
+regime — often just 1 month long — rather than as an anomaly within a
+larger regime. The `regime_length_months` column makes it trivial to
+distinguish transient regimes from persistent baseline shifts.
+
+# Output files
+
+Three CSVs are written alongside the existing `_stats.csv` and
+`_value_as_concept_stats.csv` for every numeric concept check.
+
+## `<baseFilePath>_drift_monthly.csv`
+
+One row per (concept, unit, year_month). Primary artifact for
+per-month drill-down.
+
+| Column | Description |
+| --- | --- |
+| `measurement_concept_id` | Concept identifier |
+| `unit_concept_id` | Unit concept (or `NA` for unit-less values) |
+| `year_month` | Calendar month, `YYYY-MM` |
+| `n_obs` | Non-NA value count for the month |
+| `psi_origin` | PSI vs. origin baseline |
+| `wasserstein_origin` | Wasserstein-1 vs. origin baseline, in value units |
+| `jsd_origin` | Jensen-Shannon divergence (log2, in [0, 1]) vs. origin |
+| `psi_current` | PSI vs. current regime baseline |
+| `wasserstein_current` | Wasserstein-1 vs. current regime baseline |
+| `jsd_current` | JSD vs. current regime baseline |
+| `bcp_posterior` | Bayesian posterior that a change occurred *between* this month and the next (last month is always NA) |
+| `regime_id` | Sequential regime identifier |
+| `regime_length_months` | Total eligible months in this month's regime |
+| `is_regime_start` | TRUE if this month is the first eligible month of a new regime |
+| `is_anomaly` | TRUE if `psi_current > threshold` and not a regime start |
+| `insufficient_data` | TRUE if `n_obs < minMonthObs` (drift metrics NA) |
+
+## `<baseFilePath>_drift_summary.csv`
+
+One row per (concept, unit). Dashboard sorting / triage artifact.
+
+| Column | Description |
+| --- | --- |
+| `origin_baseline_start` / `origin_baseline_end` | Bounds of the fixed origin baseline window |
+| `origin_n_months`, `origin_n_obs` | Origin baseline sample size |
+| `n_bins` | Actual bin count (may be < 10 if origin values had ties) |
+| `n_regimes` | Number of regimes detected across the whole series |
+| `regime_change_months` | Semicolon-separated list of regime start months |
+| `regime_lengths_months` | Semicolon-separated list of regime durations aligned with `regime_change_months` |
+| `current_regime_start`, `current_regime_length_months` | The regime the latest month belongs to |
+| `n_anomalous_months`, `anomalous_months` | Months flagged as within-regime anomalies |
+| `max_psi_origin`, `max_psi_current`, `max_wasserstein_origin`, `max_wasserstein_current` | Peak drift scores across the series — useful for sorting the dashboard by "which concepts drifted the most?" |
+
+## `<baseFilePath>_drift_histogram.csv`
+
+One row per (concept, unit, year_month, bin). Reshape-ready for external
+visualization tools (e.g., `EHRtemporalVariability::estimateDataTemporalMap()`).
+
+| Column | Description |
+| --- | --- |
+| `bin_index` | Sequential bin id (1..n_bins) |
+| `bin_lower`, `bin_upper` | Bin edges. First bin's lower is `-Inf`; last bin's upper is `+Inf` |
+| `count` | Observation count in this bin for this month |
+| `proportion` | Bin proportion (sums to 1 within month) |
+
+# Interpreting results
+
+## Regime durations tell you the story shape
+
+The pattern of `regime_lengths_months` values indicates what happened:
+
+- `[36]` — completely stable series, no drift
+- `[18, 24]` — one persistent baseline shift after 18 months
+- `[15, 1, 20]` — 1-month transient anomaly, followed by return to normal, then persistent shift
+- `[10, 2, 4, 20]` — brief instability period, then stable new baseline
+
+For actionable triage, filter regimes to those `regime_length_months >= 3`
+to focus on persistent shifts, and inspect short (1–2 month) regimes
+separately as candidate ETL / ingest anomalies.
+
+## Origin vs. current comparisons answer different questions
+
+- **`psi_origin` high, `psi_current` low** — the data has drifted from
+  its historical baseline, but has been stable *recently*. The current
+  regime is the "new normal."
+- **`psi_origin` low, `psi_current` high** — recent months look different
+  from the rest of their regime. Something is starting to happen; may
+  precede a regime break in subsequent months.
+- **Both high** — active, ongoing drift.
+
+## Threshold calibration
+
+Defaults (`driftPsiThreshold = 0.25`, `bcpThreshold = 0.5`) are calibrated
+for concepts with several hundred observations per month and 10 bins.
+Within a stable regime with this sample size, mean `psi_current` typically
+sits around 0.05. Anything above 0.25 is a strong signal of month-vs-regime
+divergence.
+
+For lower-volume concepts (e.g., 30–100 obs/month), sampling noise inflates
+PSI, and the 0.25 threshold may generate false positives. Consider raising
+`driftPsiThreshold` or `minMonthObs`.
+
+# Known limitations
+
+- **Ineligible months create implicit gaps.** `bcp` treats the sequence of
+  eligible months as contiguous even if calendar months are missing
+  between them. For sparse concepts, a gap of many months followed by
+  new data may be modeled as continuous change rather than a discontinuity.
+- **`bcp` is stochastic.** MCMC-based methods produce slightly different
+  posteriors on each run. If exact reproducibility is required, wrap
+  `executeDqChecks()` in a `set.seed()` call.
+- **PSI is unbounded above** and can produce very large values (10+) for
+  distributions with disjoint support. Cap for visualization purposes.
+- **Drift is currently computed per (concept, unit) independently.** A
+  unit switch (e.g., mg/dL → mmol/L) will appear as two separate groups,
+  each with its own baseline — not as drift within a single group.
+
+# References
+
+- Barry, D., & Hartigan, J. A. (1993). A Bayesian analysis for change point problems. *JASA*, 88(421), 309–319.
+- Erdman, C., & Emerson, J. W. (2007). bcp: An R package for performing a Bayesian analysis of change point problems. *Journal of Statistical Software*, 23(3).
+- Sáez, C., Gutiérrez-Sacristán, A., Kohane, I., García-Gómez, J. M., & Avillach, P. (2020). EHRtemporalVariability: delineating temporal data-set shifts in electronic health records. *GigaScience*, 9(8), giaa079.
+- Taplin, R., & Hunt, C. (2019). The population accuracy index: a new measure of population stability for model monitoring. *Risks*, 7(2), 53.

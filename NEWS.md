@@ -1,3 +1,26 @@
+DataQualityDashboard 2.9.0
+==========================
+This release adds automated **temporal data drift analysis** as an extension of
+the numeric_stats check. When enabled (default), each numeric CDM field / concept /
+unit combination is analyzed for distributional change over time using PSI,
+Wasserstein-1, and Jensen-Shannon divergence against both a fixed origin
+baseline and a rolling "current regime" baseline. Bayesian changepoint
+detection (`bcp`) identifies regime boundaries and their durations, and
+per-month drift scores are flagged as anomalies when they exceed threshold.
+
+- New `computeDrift` parameter on `executeDqChecks()` (default `TRUE`); set to
+  `FALSE` to skip drift computation without disabling numeric_stats.
+- Three new CSVs are produced alongside each `_stats.csv`:
+  `_drift_monthly.csv` (per concept/unit/month), `_drift_summary.csv`
+  (per concept/unit with regime change months, regime durations, anomalies),
+  and `_drift_histogram.csv` (per concept/unit/month/bin for drill-down).
+- No additional warehouse queries: drift reuses the same Andromeda cache that
+  numeric_stats already streams from the CDM, so runtime impact is measured
+  entirely in local R computation.
+- New Imports: `bcp`, `philentropy`, `transport`.
+- See the `DataDrift` vignette for output schemas, threshold guidance, and
+  interpretation of regime durations vs. anomalies.
+
 DataQualityDashboard 2.8.3
 ==========================
 This release adds missing plausible units to the `plausibleUnitConceptIds` check.

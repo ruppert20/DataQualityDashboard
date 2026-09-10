@@ -82,7 +82,8 @@ calculate_mode <- function(x) {
                           outputFolder,
                           patEncSql,
                           cdmVersion = "5.4",
-                          resume = TRUE) {
+                          resume = TRUE,
+                          computeDrift = TRUE) {
   singleThreaded <- TRUE
   start <- Sys.time()
   if (is.null(connection)) {
@@ -266,6 +267,11 @@ calculate_mode <- function(x) {
                             )%>%
                             dplyr::mutate(measurement_concept_id=paste(check_name, "overall", sep='_'), value_as_concept_id=NA)),
                         paste(baseFilePath, 'value_as_concept_stats.csv', sep='_'), row.names = FALSE)
+
+            if (isTRUE(computeDrift)) {
+              ParallelLogger::logInfo(sprintf("Computing data drift for %s", check_name))
+              .computeDrift(qData = qData, baseFilePath = baseFilePath)
+            }
           }
         } else if (grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)){
           # calculate stats

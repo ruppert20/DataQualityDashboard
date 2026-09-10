@@ -36,6 +36,7 @@
 #' @param sqlOnlyUnionCount         (OPTIONAL) How many SQL commands to union before inserting them into output table (speeds processing when queries done in parallel). Default is 1.
 #' @param sqlOnlyIncrementalInsert  (OPTIONAL) Boolean to determine whether insert check results and associated metadata into output table.  Default is FALSE (for backwards compatability to <= v2.2.0)
 #' @param sqlOnly                   Should the SQLs be executed (FALSE) or just returned (TRUE)?
+#' @param computeDrift              Whether to compute data drift metrics for numeric checks. Default TRUE.
 #'
 #' @return A dataframe containing the check results or SQL queries (NULL if sqlOnlyIncrementalInsert is TRUE)
 #'
@@ -62,7 +63,8 @@
                       outputFolder,
                       sqlOnlyUnionCount,
                       sqlOnlyIncrementalInsert,
-                      sqlOnly) {
+                      sqlOnly,
+                      computeDrift = TRUE) {
   ParallelLogger::logInfo(sprintf("Processing check description: %s", checkDescription$checkName))
 
   filterExpression <- sprintf(
@@ -142,7 +144,8 @@
           sql = sql,
           outputFolder = outputFolder,
           patEncSql = patEncSql,
-          cdmVersion = cdmVersion
+          cdmVersion = cdmVersion,
+          computeDrift = computeDrift
         )
       }
     })

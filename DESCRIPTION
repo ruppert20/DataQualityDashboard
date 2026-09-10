@@ -37,7 +37,10 @@ Imports:
     stringr,
     rlang,
     tidyselect,
-    readr
+    readr,
+    bcp,
+    philentropy,
+    transport
 Suggests:
     testthat,
     knitr,

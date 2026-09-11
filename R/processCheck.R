@@ -270,7 +270,24 @@ calculate_mode <- function(x) {
 
             if (isTRUE(computeDrift)) {
               ParallelLogger::logInfo(sprintf("Computing data drift for %s", check_name))
-              .computeDrift(qData = qData, baseFilePath = baseFilePath)
+              # Isolate drift warnings/errors from the outer tryCatch on .processCheck:
+              # a warning here (e.g., first-time lazy-load of bcp) would otherwise abort
+              # the entire check via the warning handler at the bottom of this function.
+              tryCatch(
+                withCallingHandlers(
+                  .computeDrift(qData = qData, baseFilePath = baseFilePath),
+                  warning = function(w) {
+                    ParallelLogger::logInfo(sprintf(
+                      "Drift (non-fatal) warning for %s: %s", check_name, w$message))
+                    invokeRestart("muffleWarning")
+                  }
+                ),
+                error = function(e) {
+                  ParallelLogger::logWarn(sprintf(
+                    "Drift computation failed for %s: %s",
+                    check_name, conditionMessage(e)))
+                }
+              )
             }
           }
         } else if (grepl('CONCEPT_CENSUS_CHECK', sql, TRUE)){

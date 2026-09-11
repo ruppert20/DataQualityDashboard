@@ -203,7 +203,9 @@
                   monthly$m_sd[eligible_idx])
     )
     bcp_post <- tryCatch({
-      bcp_res <- bcp::bcp(bcp_input)
+      # suppressWarnings: bcp emits a benign "built under R x.y.z" message on
+      # first lazy-load; DQD's outer warning handler would otherwise abort.
+      bcp_res <- suppressWarnings(bcp::bcp(bcp_input))
       as.numeric(bcp_res$posterior.prob)
     }, error = function(e) {
       ParallelLogger::logWarn(sprintf(

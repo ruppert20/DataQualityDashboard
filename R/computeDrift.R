@@ -36,6 +36,9 @@
 #'
 #' @return invisibly, a list with elements `monthly`, `summary`, `histogram`.
 #'
+#' @importFrom rlang .data
+#' @importFrom magrittr %>%
+#'
 #' @keywords internal
 .computeDrift <- function(qData,
                           baseFilePath,
@@ -60,15 +63,16 @@
   # is.finite() rejects NA, NaN, and Inf in one go — Inf would corrupt
   # mean/sd/Wasserstein without triggering the NA filter.
   df <- qData %>%
-    dplyr::filter(is.finite(value_as_number), !is.na(measurement_datetime)) %>%
-    dplyr::mutate(year_month = .toYearMonth(measurement_datetime))
+    dplyr::filter(is.finite(.data$value_as_number),
+                  !is.na(.data$measurement_datetime)) %>%
+    dplyr::mutate(year_month = .toYearMonth(.data$measurement_datetime))
 
   if (nrow(df) == 0) {
     return(invisible(emptyOutputs))
   }
 
   groups <- df %>%
-    dplyr::distinct(measurement_concept_id, unit_concept_id) %>%
+    dplyr::distinct(.data$measurement_concept_id, .data$unit_concept_id) %>%
     as.data.frame()
 
   monthly_all <- vector("list", nrow(groups))
@@ -81,10 +85,12 @@
 
     if (is.na(uid)) {
       grp <- df %>%
-        dplyr::filter(measurement_concept_id == cid, is.na(unit_concept_id))
+        dplyr::filter(.data$measurement_concept_id == cid,
+                      is.na(.data$unit_concept_id))
     } else {
       grp <- df %>%
-        dplyr::filter(measurement_concept_id == cid, unit_concept_id == uid)
+        dplyr::filter(.data$measurement_concept_id == cid,
+                      .data$unit_concept_id == uid)
     }
 
     res <- tryCatch(
@@ -124,19 +130,19 @@
   if (nrow(grp) == 0) return(NULL)
 
   monthly_raw <- grp %>%
-    dplyr::group_by(year_month) %>%
+    dplyr::group_by(.data$year_month) %>%
     dplyr::summarise(
       n_obs = dplyr::n(),
-      m_mean = mean(value_as_number, na.rm = TRUE),
-      m_sd = stats::sd(value_as_number, na.rm = TRUE),
-      values = list(value_as_number),
+      m_mean = mean(.data$value_as_number, na.rm = TRUE),
+      m_sd = stats::sd(.data$value_as_number, na.rm = TRUE),
+      values = list(.data$value_as_number),
       .groups = "drop"
     ) %>%
-    dplyr::arrange(year_month)
+    dplyr::arrange(.data$year_month)
 
   if (nrow(monthly_raw) < 2) return(NULL)
 
-  eligible <- monthly_raw %>% dplyr::filter(n_obs >= minMonthObs)
+  eligible <- monthly_raw %>% dplyr::filter(.data$n_obs >= minMonthObs)
   if (nrow(eligible) == 0) return(NULL)
 
   origin_months <- utils::head(eligible$year_month, originWindowMonths)
@@ -154,7 +160,7 @@
 
   monthly <- monthly_raw %>%
     dplyr::mutate(
-      insufficient_data = n_obs < minMonthObs
+      insufficient_data = .data$n_obs < minMonthObs
     )
 
   monthly$psi_origin <- NA_real_
@@ -262,8 +268,8 @@
   # Regime length: number of eligible months in each regime, joined back onto
   # every eligible month. Ineligible months (insufficient data) get NA.
   regime_lengths <- monthly %>%
-    dplyr::filter(!is.na(regime_id)) %>%
-    dplyr::count(regime_id, name = "regime_length_months")
+    dplyr::filter(!is.na(.data$regime_id)) %>%
+    dplyr::count(.data$regime_id, name = "regime_length_months")
   monthly <- monthly %>%
     dplyr::left_join(regime_lengths, by = "regime_id")
 
@@ -273,11 +279,11 @@
       unit_concept_id = uid
     ) %>%
     dplyr::select(
-      measurement_concept_id, unit_concept_id, year_month, n_obs,
-      psi_origin, wasserstein_origin, jsd_origin,
-      psi_current, wasserstein_current, jsd_current,
-      bcp_posterior, regime_id, regime_length_months,
-      is_regime_start, is_anomaly, insufficient_data
+      "measurement_concept_id", "unit_concept_id", "year_month", "n_obs",
+      "psi_origin", "wasserstein_origin", "jsd_origin",
+      "psi_current", "wasserstein_current", "jsd_current",
+      "bcp_posterior", "regime_id", "regime_length_months",
+      "is_regime_start", "is_anomaly", "insufficient_data"
     )
 
   regime_starts <- monthly_out$year_month[monthly_out$is_regime_start]
@@ -353,8 +359,8 @@
 
   # Trend tests: Mann-Kendall on monthly mean AND on monthly psi_origin.
   eligible_monthly <- monthly_out %>%
-    dplyr::filter(!insufficient_data) %>%
-    dplyr::arrange(year_month)
+    dplyr::filter(!.data$insufficient_data) %>%
+    dplyr::arrange(.data$year_month)
   # month means come from monthly (with values); align eligible ones:
   eligible_means <- monthly$m_mean[!monthly$insufficient_data]
   tr_mean <- .trendTest(eligible_means)

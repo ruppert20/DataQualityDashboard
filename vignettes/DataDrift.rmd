@@ -93,6 +93,114 @@ regime — often just 1 month long — rather than as an anomaly within a
 larger regime. The `regime_length_months` column makes it trivial to
 distinguish transient regimes from persistent baseline shifts.
 
+## Trend and seasonality tests
+
+Two auxiliary tests run per concept to feed pattern classification:
+
+- **Mann-Kendall trend test** (`Kendall::MannKendall`) — non-parametric
+  test for monotonic trend, run on both the monthly mean series (does
+  central tendency drift smoothly?) and the monthly `psi_origin` series
+  (is drift accumulating over time?). Returns Kendall's tau in [−1, 1]
+  and a two-sided p-value. |tau| > 0.7 with p < 0.05 is treated as a
+  strong monotonic signal.
+- **Lag-12 autocorrelation** (`stats::acf`) — detects annual seasonality
+  in the monthly mean series. Significant when the ACF at lag 12 exceeds
+  2/√n (approximate 95% white-noise threshold).
+
+## Bimodality test
+
+`diptest::dip.test` runs on the origin baseline and on the current
+regime's pooled values. A significance flip (unimodal → bimodal or vice
+versa) is what triggers the `bimodal_change` pattern — a change in the
+*shape* of the distribution, not just its location.
+
+## Priority score
+
+`priority_score = max(psi_origin, psi_current) × log10(1 + total_n_obs)`
+
+A single sortable number combining drift magnitude with data volume. A
+concept drifting badly but with only 100 total observations is less
+urgent than one drifting moderately with 100,000 observations. Sorting
+the drift summary by this score puts the most-impactful concepts at the
+top.
+
+# Pattern classification
+
+Every concept-unit series is assigned a `pattern_type` label based on
+which of ten rules match. When multiple rules match (the common case),
+all matching labels are also stored in `pattern_tags`, and the primary
+`pattern_type` is picked by precedence — favoring labels that specify
+the *kind* of shift (which determines chart choice) over labels that
+specify the *timing* alone.
+
+## The ten pattern types
+
+| `pattern_type` | Detection rule (features from the summary) |
+| --- | --- |
+| `stable` | `max_psi < 0.1` AND `n_regimes ≤ 1`. Short-circuits everything else |
+| `bimodal_change` | `dip_pvalue_origin` and `dip_pvalue_current` disagree at α = 0.05 (unimodal ↔ bimodal) |
+| `seasonal` | `seasonality_significant = TRUE` (|ACF@12| > 2/√n) |
+| `transient_anomalies` | `n_regimes ≥ 2` AND `min_regime_length_months ≤ 2` AND `max_regime_length_months ≥ 6` |
+| `scale_shift` | `n_regimes == 2` AND `\|delta_sd_pct\| > 20` AND `\|delta_mean_pct\| < 10` |
+| `tail_shift` | `n_regimes == 2` AND (`\|delta_p5_pct\| > 15` OR `\|delta_p95_pct\| > 15`) AND `\|delta_mean_pct\| < 5` AND `\|delta_sd_pct\| < 15` |
+| `location_shift` | `n_regimes == 2` AND `\|delta_mean_pct\| > 10` AND `\|delta_sd_pct\| < 20` |
+| `monotonic_trend` | `trend_pvalue_mean < 0.05` AND `\|trend_tau_mean\| > 0.7` |
+| `step_change` | `n_regimes == 2` AND both regime lengths ≥ 3 — fallback when no distributional pattern fires |
+| `gradual_drift` | Fallback — drift exists but doesn't match any cleaner rule |
+
+## Precedence for the primary label
+
+1. `stable` (short-circuits — nothing else evaluated)
+2. `bimodal_change`
+3. `seasonal`
+4. `transient_anomalies`
+5. `scale_shift`
+6. `tail_shift`
+7. `location_shift`
+8. `monotonic_trend`
+9. `step_change`
+10. `gradual_drift`
+
+Distributional patterns (scale/tail/location/bimodal) win over temporal
+patterns (trend/step) because they specify the *shape* of change and
+therefore drive graph selection. If a concept has both a distributional
+and a temporal pattern (very common — a step change usually shifts the
+mean), the distributional label is primary and the temporal label goes
+into `pattern_tags`.
+
+## Recommended plots per pattern
+
+The `pattern_type` maps directly to a suggested chart. A dashboard
+implementation can use this to auto-select the drill-down view.
+
+| `pattern_type` | Recommended primary plot | Recommended secondary plot | What to look for |
+| --- | --- | --- | --- |
+| `stable` | Sparkline of monthly mean | Sparkline of `n_obs` | No action expected — sanity check that data volume hasn't collapsed |
+| `bimodal_change` | Ridgeline density plot, one row per year | Overlaid density: origin vs. current regime | The emergence (or disappearance) of a second mode. Often means two subpopulations mixed together, or a subcohort added/removed |
+| `seasonal` | STL decomposition (`stats::stl`) of monthly mean | Monthly boxplot faceted by calendar month | Amplitude of the annual cycle; whether it's constant or growing/shrinking |
+| `transient_anomalies` | Time series of monthly mean with anomaly months marked | Density plot of anomaly month(s) vs. surrounding regime | Investigate each transient month as a candidate ETL/ingest event; check surrounding calendar events |
+| `scale_shift` | Violin or boxplot, one violin per regime | Time series of monthly SD | Cause is usually instrument recalibration, protocol change, or population change (e.g., adding pediatrics widens ranges) |
+| `tail_shift` | Q-Q plot vs. origin baseline; or density plot with tails highlighted | Time series of p5 and p95 | Center stable, tails moving — often signals new extremes appearing (rare disease onset in cohort, sensor precision improvement) |
+| `location_shift` | Violin per regime | Time series of monthly mean with regime bands shaded | Cause is typically unit change, coding change, or population case-mix shift |
+| `monotonic_trend` | Line plot of monthly mean with linear/loess regression | Time series of `psi_origin` cumulative | Slow trends often reflect gradual population change (aging cohort) or cumulative measurement bias |
+| `step_change` | Time series of monthly mean with regime bands shaded | Boxplot per regime | Rare as a primary — usually indicates a distributional signal that just didn't cross the thresholds |
+| `gradual_drift` | Time series of monthly mean, SD, and `psi_origin` on a shared time axis | Density heatmap (from `_drift_histogram.csv`) | No clean pattern — inspect the raw metrics and look for slower/complex behavior |
+
+## Cross-cutting suggestions
+
+Regardless of the primary pattern, the following plots are always useful
+during drill-down:
+
+- **Time series of `psi_origin` and `psi_current`**, both on the same axis
+  — shows whether drift is against the historical baseline, the current
+  regime, or both.
+- **Regime timeline bar** — a stacked horizontal bar with one segment per
+  regime, sized by duration, colored by regime index. Instantly readable.
+- **The three-CSV drill-down** — pair `_drift_monthly.csv` (a table of
+  scores) with `_drift_histogram.csv` (heatmap-ready). Feeding the latter
+  to `EHRtemporalVariability::estimateDataTemporalMap()` produces the
+  IGT projection that is a de facto standard for OMOP data-drift visuals.
+
 # Output files
 
 Three CSVs are written alongside the existing `_stats.csv` and
@@ -134,9 +242,18 @@ One row per (concept, unit). Dashboard sorting / triage artifact.
 | `n_regimes` | Number of regimes detected across the whole series |
 | `regime_change_months` | Semicolon-separated list of regime start months |
 | `regime_lengths_months` | Semicolon-separated list of regime durations aligned with `regime_change_months` |
+| `min_regime_length_months`, `max_regime_length_months` | Shortest and longest regime — used by the pattern classifier to distinguish transient blips from persistent shifts |
 | `current_regime_start`, `current_regime_length_months` | The regime the latest month belongs to |
 | `n_anomalous_months`, `anomalous_months` | Months flagged as within-regime anomalies |
-| `max_psi_origin`, `max_psi_current`, `max_wasserstein_origin`, `max_wasserstein_current` | Peak drift scores across the series — useful for sorting the dashboard by "which concepts drifted the most?" |
+| `max_psi_origin`, `max_psi_current`, `max_wasserstein_origin`, `max_wasserstein_current` | Peak drift scores across the series |
+| `delta_mean_pct`, `delta_sd_pct`, `delta_p5_pct`, `delta_p95_pct` | Percent change in the value distribution's mean / SD / 5th / 95th percentile between the first and last regime. Drives location vs. scale vs. tail-shift classification |
+| `trend_tau_mean`, `trend_pvalue_mean` | Mann-Kendall test on the monthly mean series — detects monotonic drift in central tendency. `tau` in [−1, 1] |
+| `trend_tau_psi`, `trend_pvalue_psi` | Mann-Kendall test on the monthly `psi_origin` series — detects drift *accumulation* over time |
+| `seasonality_acf_lag12`, `seasonality_significant` | Autocorrelation at lag 12 of the monthly mean series; TRUE if it exceeds the 95% white-noise threshold |
+| `dip_stat_origin`, `dip_pvalue_origin`, `dip_stat_current`, `dip_pvalue_current` | Hartigan's dip test for unimodality on the origin and current-regime pooled distributions. p < 0.05 rejects unimodality |
+| `priority_score` | `max(psi_origin, psi_current) * log10(1 + total_n_obs)` — sortable score combining drift magnitude and data volume. High priority = drifting concept with high traffic |
+| `pattern_type` | Rule-based primary drift pattern label — see the Pattern Classification section |
+| `pattern_tags` | Semicolon-separated list of all rules that matched. Useful when a concept has multiple simultaneous patterns |
 
 ## `<baseFilePath>_drift_histogram.csv`
 
@@ -151,6 +268,24 @@ visualization tools (e.g., `EHRtemporalVariability::estimateDataTemporalMap()`).
 | `proportion` | Bin proportion (sums to 1 within month) |
 
 # Interpreting results
+
+## Reading each metric
+
+| Metric | Range | Reading |
+| --- | --- | --- |
+| **`psi_origin` / `psi_current`** | 0 to ~ (unbounded) | < 0.1 stable · 0.1–0.25 moderate drift · > 0.25 significant drift · > 1.0 severe (distributions barely overlap in binning). Origin comparison answers "how different from history?"; current answers "how different from recent normal?" |
+| **`wasserstein_origin` / `wasserstein_current`** | 0 to ~ (in value units) | Interpreted directly in the measurement's units. E.g., Wasserstein of 3.2 for glucose in mg/dL means the current distribution's "mass" is shifted 3.2 mg/dL on average from the baseline. Compare against the clinical resolution of the measurement |
+| **`jsd_origin` / `jsd_current`** | [0, 1] (log2) | 0 identical · < 0.05 minor · 0.05–0.15 moderate · > 0.15 major shape divergence. Bounded and symmetric — good for cross-concept comparison since scale doesn't depend on the measurement's units |
+| **`bcp_posterior`** | [0, 1] | Probability that a regime change occurred *between* this month and the next. Above `bcpThreshold` (default 0.5) starts a new regime one month later. Values near 0.5 are uncertain — inspect visually |
+| **`regime_length_months`** | 1 to N | 1–2: transient blip · 3–5: brief instability · 6+: persistent regime |
+| **`trend_tau_mean`** | [−1, 1] | > 0 increasing · < 0 decreasing · magnitude reflects strength. Values around ±0.5 indicate a step-like change; values > ±0.7 with low p-value indicate a smooth trend |
+| **`trend_tau_psi`** | [−1, 1] | Positive tau means drift is *accumulating* — each month is further from the origin baseline than the last. Watch this metric even when the mean is stable, as it can reveal slow shape change |
+| **`seasonality_acf_lag12`** | [−1, 1] | > 0.3 typically indicates a real yearly cycle. Negative values mean anti-seasonality (this month tends to be opposite the same month a year ago — rare, usually a data problem) |
+| **`dip_pvalue_origin` / `dip_pvalue_current`** | (0, 1] | < 0.05 rejects unimodality (distribution has ≥ 2 modes). Pattern classifier fires on a flip in significance between origin and current |
+| **`delta_mean_pct`** | percent | First regime → last regime percent change in mean. > 10% typically actionable |
+| **`delta_sd_pct`** | percent | Percent change in SD. > 20% typically actionable (usually reflects instrument or population change) |
+| **`delta_p5_pct` / `delta_p95_pct`** | percent | Tail movement; > 15% with stable center signals new extremes appearing |
+| **`priority_score`** | 0 to ~ | Higher = more urgent. Combines magnitude and volume. Sort dashboard descending by this |
 
 ## Regime durations tell you the story shape
 
@@ -186,6 +321,36 @@ divergence.
 For lower-volume concepts (e.g., 30–100 obs/month), sampling noise inflates
 PSI, and the 0.25 threshold may generate false positives. Consider raising
 `driftPsiThreshold` or `minMonthObs`.
+
+# Workup workflow
+
+A pragmatic drill-down sequence for a flagged concept:
+
+1. **Sort the drift summary by `priority_score` descending.** Investigate
+   the top concepts first — they combine high drift with high volume.
+2. **Read `pattern_type` and `pattern_tags`** to understand the *kind* of
+   drift. Use the Recommended Plots table to pick the appropriate chart.
+3. **Check the temporal shape** via `regime_change_months` +
+   `regime_lengths_months` — is this a single break, a series of blips,
+   or ongoing gradual drift?
+4. **Confirm severity** by looking at the raw metrics:
+   - `max_psi_origin` for magnitude vs. baseline
+   - `max_psi_current` for magnitude vs. recent regime
+   - `wasserstein_*` for magnitude in the measurement's units
+5. **Compare origin vs. current**: if `psi_origin` is high but
+   `psi_current` is low, the shift already happened and stabilized —
+   consider updating the baseline. If both are high, drift is ongoing.
+6. **Drill down to the monthly view** via `_drift_monthly.csv` and pair
+   with `_drift_histogram.csv` for a per-month distributional snapshot.
+7. **Cross-check nearby concepts** — if multiple related concepts (e.g.,
+   all labs from the same panel) drift simultaneously in the same month,
+   the cause is almost certainly ETL / ingestion / vendor-side, not
+   clinical.
+8. **Document and act** — the anomaly and regime months are precise
+   enough to line up against ETL logs, vendor change notices, or
+   protocol updates. If the drift was expected (e.g., new site added),
+   consider treating the current regime as the new baseline for
+   downstream analyses.
 
 # Known limitations
 

@@ -57,9 +57,11 @@
     return(invisible(emptyOutputs))
   }
 
+  # is.finite() rejects NA, NaN, and Inf in one go — Inf would corrupt
+  # mean/sd/Wasserstein without triggering the NA filter.
   df <- qData %>%
-    dplyr::filter(!is.na(value_as_number), !is.na(measurement_datetime)) %>%
-    dplyr::mutate(year_month = format(as.Date(measurement_datetime), "%Y-%m"))
+    dplyr::filter(is.finite(value_as_number), !is.na(measurement_datetime)) %>%
+    dplyr::mutate(year_month = .toYearMonth(measurement_datetime))
 
   if (nrow(df) == 0) {
     return(invisible(emptyOutputs))
@@ -314,6 +316,109 @@
 
   histogram_out <- dplyr::bind_rows(hist_rows)
 
+  # ---- Pattern-classification features ---------------------------------------
+  # Per-regime aggregate stats: mean, sd, p5, p95 over the regime's pooled values.
+  regime_stats_list <- lapply(sort(unique(stats::na.omit(monthly$regime_id))),
+                              function(rid) {
+    rr <- which(monthly$regime_id == rid & !is.na(monthly$regime_id))
+    v <- unlist(monthly$values[rr], use.names = FALSE)
+    v <- v[!is.na(v)]
+    if (length(v) == 0) return(NULL)
+    data.frame(
+      regime_id = rid,
+      regime_mean = mean(v),
+      regime_sd = stats::sd(v),
+      regime_p5 = as.numeric(stats::quantile(v, 0.05, names = FALSE)),
+      regime_p95 = as.numeric(stats::quantile(v, 0.95, names = FALSE)),
+      regime_n = length(v)
+    )
+  })
+  regime_stats <- dplyr::bind_rows(regime_stats_list)
+
+  # First-vs-last regime deltas as % change (drives location/scale/tail patterns).
+  if (nrow(regime_stats) >= 2) {
+    fr <- regime_stats[1, ]
+    lr <- regime_stats[nrow(regime_stats), ]
+    delta_mean_pct <- .pctChange(fr$regime_mean, lr$regime_mean)
+    delta_sd_pct <- .pctChange(fr$regime_sd, lr$regime_sd)
+    delta_p5_pct <- .pctChange(fr$regime_p5, lr$regime_p5)
+    delta_p95_pct <- .pctChange(fr$regime_p95, lr$regime_p95)
+  } else {
+    delta_mean_pct <- delta_sd_pct <- delta_p5_pct <- delta_p95_pct <- NA_real_
+  }
+  min_regime_length_months <- if (length(regime_start_lengths) > 0)
+    min(regime_start_lengths, na.rm = TRUE) else NA_integer_
+  max_regime_length_months <- if (length(regime_start_lengths) > 0)
+    max(regime_start_lengths, na.rm = TRUE) else NA_integer_
+
+  # Trend tests: Mann-Kendall on monthly mean AND on monthly psi_origin.
+  eligible_monthly <- monthly_out %>%
+    dplyr::filter(!insufficient_data) %>%
+    dplyr::arrange(year_month)
+  # month means come from monthly (with values); align eligible ones:
+  eligible_means <- monthly$m_mean[!monthly$insufficient_data]
+  tr_mean <- .trendTest(eligible_means)
+  tr_psi <- .trendTest(eligible_monthly$psi_origin)
+
+  # Seasonality: ACF at lag 12 on monthly mean.
+  seas <- .seasonalityLag12(eligible_means)
+
+  # Bimodality: dip test on origin baseline vs. current-regime pooled values.
+  current_regime_values <- if (nrow(regime_stats) >= 1) {
+    rr <- which(monthly$regime_id == utils::tail(regime_stats$regime_id, 1))
+    v <- unlist(monthly$values[rr], use.names = FALSE)
+    v[!is.na(v)]
+  } else numeric(0)
+  dip_orig <- .dipTest(origin_values)
+  dip_curr <- .dipTest(current_regime_values)
+
+  # Priority: sortable "how much drift × how much data" score.
+  psi_max <- suppressWarnings(max(c(summary_out$max_psi_origin,
+                                    summary_out$max_psi_current), na.rm = TRUE))
+  if (!is.finite(psi_max)) psi_max <- 0
+  total_n_obs <- sum(monthly$n_obs, na.rm = TRUE)
+  priority_score <- psi_max * log10(1 + total_n_obs)
+
+  # Classifier.
+  features <- list(
+    max_psi_origin = summary_out$max_psi_origin,
+    max_psi_current = summary_out$max_psi_current,
+    n_regimes = summary_out$n_regimes,
+    min_regime_length_months = min_regime_length_months,
+    max_regime_length_months = max_regime_length_months,
+    delta_mean_pct = delta_mean_pct,
+    delta_sd_pct = delta_sd_pct,
+    delta_p5_pct = delta_p5_pct,
+    delta_p95_pct = delta_p95_pct,
+    trend_tau_mean = tr_mean$tau,
+    trend_pvalue_mean = tr_mean$p_value,
+    seasonality_significant = seas$significant,
+    dip_pvalue_origin = dip_orig$p_value,
+    dip_pvalue_current = dip_curr$p_value
+  )
+  cls <- .classifyPattern(features)
+
+  # Extend summary with classification + tests + priority.
+  summary_out$delta_mean_pct <- delta_mean_pct
+  summary_out$delta_sd_pct <- delta_sd_pct
+  summary_out$delta_p5_pct <- delta_p5_pct
+  summary_out$delta_p95_pct <- delta_p95_pct
+  summary_out$min_regime_length_months <- min_regime_length_months
+  summary_out$max_regime_length_months <- max_regime_length_months
+  summary_out$trend_tau_mean <- tr_mean$tau
+  summary_out$trend_pvalue_mean <- tr_mean$p_value
+  summary_out$trend_tau_psi <- tr_psi$tau
+  summary_out$trend_pvalue_psi <- tr_psi$p_value
+  summary_out$seasonality_acf_lag12 <- seas$acf_lag12
+  summary_out$seasonality_significant <- seas$significant
+  summary_out$dip_stat_origin <- dip_orig$dip
+  summary_out$dip_pvalue_origin <- dip_orig$p_value
+  summary_out$dip_stat_current <- dip_curr$dip
+  summary_out$dip_pvalue_current <- dip_curr$p_value
+  summary_out$priority_score <- priority_score
+  summary_out$pattern_type <- cls$pattern_type
+  summary_out$pattern_tags <- cls$pattern_tags
+
   list(
     monthly = monthly_out,
     summary = summary_out,
@@ -367,6 +472,177 @@
   tryCatch({
     as.numeric(transport::wasserstein1d(a, b, p = 1))
   }, error = function(e) NA_real_)
+}
+
+
+# Timezone-safe YYYY-MM extraction: preserves whichever TZ the source column
+# carries (or UTC if none), avoiding silent day/month shifts when the caller's
+# system TZ differs from the CDM's stored TZ. as.Date() on POSIXct would use
+# Sys.timezone() by default which is the source of the bug.
+.toYearMonth <- function(x) {
+  if (inherits(x, "POSIXt")) {
+    tz <- attr(x, "tzone")
+    if (is.null(tz) || length(tz) == 0 || tz == "") tz <- "UTC"
+    return(format(x, "%Y-%m", tz = tz))
+  }
+  if (inherits(x, "Date")) return(format(x, "%Y-%m"))
+  # Fallback: coerce via UTC to avoid the system-tz trap.
+  format(as.POSIXct(as.character(x), tz = "UTC"), "%Y-%m", tz = "UTC")
+}
+
+
+.pctChange <- function(from_val, to_val) {
+  if (is.na(from_val) || is.na(to_val)) return(NA_real_)
+  if (abs(from_val) < 1e-9) return(NA_real_)
+  (to_val - from_val) / abs(from_val) * 100
+}
+
+
+.trendTest <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) < 4) return(list(tau = NA_real_, p_value = NA_real_))
+  # Guard against constant input — Kendall::MannKendall's C code emits an
+  # "IFAULT 12" message to stderr when all ranks are tied (tau undefined).
+  # A constant series is trivially not a trend.
+  if (length(unique(x)) < 2) return(list(tau = 0, p_value = 1))
+  tryCatch({
+    r <- Kendall::MannKendall(x)
+    list(tau = as.numeric(r$tau), p_value = as.numeric(r$sl))
+  }, error = function(e) list(tau = NA_real_, p_value = NA_real_))
+}
+
+
+.seasonalityLag12 <- function(x) {
+  x <- x[!is.na(x)]
+  # Need >= 26 points to evaluate lags 11-13 reliably.
+  if (length(x) < 26) {
+    return(list(acf_lag12 = NA_real_, threshold = NA_real_, significant = FALSE))
+  }
+  tryCatch({
+    a <- stats::acf(x, lag.max = 13, plot = FALSE)
+    v11 <- as.numeric(a$acf[12])  # lag 11
+    v12 <- as.numeric(a$acf[13])  # lag 12
+    v13 <- as.numeric(a$acf[14])  # lag 13
+    thr <- 2 / sqrt(length(x))
+    # Require:
+    #  (a) lag-12 ACF positive (annual cycle → this month correlates with
+    #      same month last year), and
+    #  (b) above the 95% white-noise threshold, and
+    #  (c) a LOCAL PEAK at lag 12 (higher than lags 11 and 13). Trends have
+    #      high ACF at every lag with slow decay, so they fail this test.
+    is_seasonal <- !is.na(v12) && v12 > thr &&
+                   (is.na(v11) || v12 > v11) &&
+                   (is.na(v13) || v12 > v13)
+    list(acf_lag12 = v12, threshold = thr, significant = is_seasonal)
+  }, error = function(e) list(acf_lag12 = NA_real_,
+                              threshold = NA_real_, significant = FALSE))
+}
+
+
+.dipTest <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) < 20) {
+    return(list(dip = NA_real_, p_value = NA_real_, is_bimodal_at_05 = NA))
+  }
+  tryCatch({
+    # suppressMessages silences the asymptotic-approximation notice diptest
+    # emits when n exceeds its built-in Monte-Carlo table (~72000).
+    r <- suppressMessages(diptest::dip.test(x))
+    list(dip = as.numeric(r$statistic),
+         p_value = as.numeric(r$p.value),
+         is_bimodal_at_05 = r$p.value < 0.05)
+  }, error = function(e) list(dip = NA_real_,
+                              p_value = NA_real_,
+                              is_bimodal_at_05 = NA))
+}
+
+
+#' Rule-based drift pattern classifier.
+#'
+#' Given a set of numeric features summarizing a concept's drift behavior,
+#' returns a primary `pattern_type` (single string) plus `pattern_tags`
+#' (semicolon-joined labels of all matching rules). Precedence for the
+#' primary label goes bimodal > seasonal > trend > step > transient >
+#' location > scale > tail > gradual, with `stable` short-circuiting the
+#' whole thing when there is essentially no drift.
+#'
+#' @keywords internal
+.classifyPattern <- function(f) {
+  psi_max <- suppressWarnings(max(c(f$max_psi_origin, f$max_psi_current),
+                                  na.rm = TRUE))
+  if (!is.finite(psi_max)) psi_max <- 0
+
+  # Stable short-circuit: essentially no drift and no regimes.
+  if (psi_max < 0.1 && (is.na(f$n_regimes) || f$n_regimes <= 1)) {
+    return(list(pattern_type = "stable", pattern_tags = "stable"))
+  }
+
+  tags <- character(0)
+
+  # --- Distinctive patterns first --------------------------------------------
+  bimodal_flip <- !is.na(f$dip_pvalue_origin) && !is.na(f$dip_pvalue_current) &&
+    ((f$dip_pvalue_origin >= 0.05 && f$dip_pvalue_current < 0.05) ||
+     (f$dip_pvalue_origin < 0.05 && f$dip_pvalue_current >= 0.05))
+  if (bimodal_flip) tags <- c(tags, "bimodal_change")
+
+  if (isTRUE(f$seasonality_significant)) tags <- c(tags, "seasonal")
+
+  # A transient is a short blip (<= 2 months) against an otherwise long
+  # (>= 6 month) stable regime. PSI magnitude is not capped: real ETL
+  # spikes can push PSI to 5+.
+  is_transient <- !is.na(f$n_regimes) && f$n_regimes >= 2 &&
+                  !is.na(f$min_regime_length_months) &&
+                  f$min_regime_length_months <= 2 &&
+                  !is.na(f$max_regime_length_months) &&
+                  f$max_regime_length_months >= 6
+  if (is_transient) tags <- c(tags, "transient_anomalies")
+
+  # --- Distributional shape (gated on 2-regime step, so "first vs. last"
+  #     comparison is meaningful) ---------------------------------------------
+  dm <- if (is.na(f$delta_mean_pct)) 0 else abs(f$delta_mean_pct)
+  ds <- if (is.na(f$delta_sd_pct)) 0 else abs(f$delta_sd_pct)
+  dp5 <- if (is.na(f$delta_p5_pct)) 0 else abs(f$delta_p5_pct)
+  dp95 <- if (is.na(f$delta_p95_pct)) 0 else abs(f$delta_p95_pct)
+
+  two_regime_step <- !is.na(f$n_regimes) && f$n_regimes == 2 &&
+                     !is.na(f$min_regime_length_months) &&
+                     f$min_regime_length_months >= 3
+
+  if (two_regime_step && dm > 10 && ds < 20) tags <- c(tags, "location_shift")
+  if (two_regime_step && ds > 20 && dm < 10) tags <- c(tags, "scale_shift")
+  if (two_regime_step && (dp5 > 15 || dp95 > 15) && dm < 5 && ds < 15)
+    tags <- c(tags, "tail_shift")
+
+  # --- Temporal shape (fall through if no distributional pattern matched) ---
+  # Trend uses a stricter |tau| > 0.7 to avoid firing on step functions
+  # (Kendall's tau on a two-regime step is ~0.5).
+  is_trend <- !is.na(f$trend_pvalue_mean) &&
+              f$trend_pvalue_mean < 0.05 &&
+              !is.na(f$trend_tau_mean) &&
+              abs(f$trend_tau_mean) > 0.7
+  if (is_trend) tags <- c(tags, "monotonic_trend")
+
+  if (two_regime_step) tags <- c(tags, "step_change")
+
+  # Precedence: distributional patterns first (they specify the KIND of shift
+  # → drives graph choice), then distinctive temporal patterns, then generic
+  # temporal signals, then fallback.
+  precedence <- c("bimodal_change",
+                  "seasonal",
+                  "transient_anomalies",
+                  "scale_shift",
+                  "tail_shift",
+                  "location_shift",
+                  "monotonic_trend",
+                  "step_change")
+  primary <- NA_character_
+  for (p in precedence) {
+    if (p %in% tags) { primary <- p; break }
+  }
+  if (is.na(primary)) primary <- "gradual_drift"
+
+  list(pattern_type = primary,
+       pattern_tags = paste(tags, collapse = ";"))
 }
 
 
@@ -426,6 +702,25 @@
     max_psi_current = numeric(0),
     max_wasserstein_origin = numeric(0),
     max_wasserstein_current = numeric(0),
+    delta_mean_pct = numeric(0),
+    delta_sd_pct = numeric(0),
+    delta_p5_pct = numeric(0),
+    delta_p95_pct = numeric(0),
+    min_regime_length_months = integer(0),
+    max_regime_length_months = integer(0),
+    trend_tau_mean = numeric(0),
+    trend_pvalue_mean = numeric(0),
+    trend_tau_psi = numeric(0),
+    trend_pvalue_psi = numeric(0),
+    seasonality_acf_lag12 = numeric(0),
+    seasonality_significant = logical(0),
+    dip_stat_origin = numeric(0),
+    dip_pvalue_origin = numeric(0),
+    dip_stat_current = numeric(0),
+    dip_pvalue_current = numeric(0),
+    priority_score = numeric(0),
+    pattern_type = character(0),
+    pattern_tags = character(0),
     stringsAsFactors = FALSE
   )
 }

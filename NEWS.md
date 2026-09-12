@@ -20,6 +20,21 @@ per-month drift scores are flagged as anomalies when they exceed threshold.
 - New Imports: `bcp`, `philentropy`, `transport`.
 - See the `DataDrift` vignette for output schemas, threshold guidance, and
   interpretation of regime durations vs. anomalies.
+- **Automated pattern classification**: every concept-unit series receives a
+  `pattern_type` label (one of `stable`, `bimodal_change`, `seasonal`,
+  `transient_anomalies`, `scale_shift`, `tail_shift`, `location_shift`,
+  `monotonic_trend`, `step_change`, `gradual_drift`) plus `pattern_tags`
+  listing all matching rules. Enables auto-selection of drill-down charts.
+- **Trend & seasonality tests**: Mann-Kendall on the monthly mean and PSI
+  series (`trend_tau_mean`, `trend_pvalue_mean`, `trend_tau_psi`,
+  `trend_pvalue_psi`), lag-12 autocorrelation for annual cycles
+  (`seasonality_acf_lag12`, `seasonality_significant`), and Hartigan's dip
+  test for bimodality on origin and current regimes.
+- **Priority score**: `max(psi_origin, psi_current) × log10(1 + total_n_obs)`
+  in the summary as a single sortable metric combining magnitude and
+  data volume — puts the most-impactful concepts at the top of the
+  dashboard.
+- Additional Imports: `Kendall`, `diptest`.
 
 DataQualityDashboard 2.8.3
 ==========================

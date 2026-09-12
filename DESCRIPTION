@@ -40,7 +40,9 @@ Imports:
     readr,
     bcp,
     philentropy,
-    transport
+    transport,
+    Kendall,
+    diptest
 Suggests:
     testthat,
     knitr,

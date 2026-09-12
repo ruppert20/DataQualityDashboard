@@ -14,22 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#' Internal function to send the fully qualified sql to the database and return the numerical result.
+#' Calculate the statistical mode of a numeric vector.
 #'
-#' @param connection                A connection for connecting to the CDM database using the DatabaseConnector::connect(connectionDetails) function.
-#' @param connectionDetails         A connectionDetails object for connecting to the CDM database.
-#' @param check                     The data quality check
-#' @param checkDescription          The description of the data quality check
-#' @param sql                       The fully qualified sql for the data quality check
-#' @param outputFolder              The folder to output logs and SQL files to.
-#' @param patEncSql                 The SQL for patient and encounter statistics
-#' @param cdmVersion                The CDM version (e.g., "5.3", "5.4")
-#' @param resume                    Whether to resume from existing Andromeda files
+#' @param x A numeric vector.
 #'
-#' @return A dataframe containing the check results
+#' @return The most-frequent value in `x`, or `NA` if `x` is empty.
 #'
 #' @keywords internal
-#'
 calculate_mode <- function(x) {
   tbl <- table(x)
   if (length(tbl) == 0) {
@@ -74,6 +65,23 @@ calculate_mode <- function(x) {
   paste(msgs, collapse = " Caused by: ")
 }
 
+#' Internal function to send the fully qualified sql to the database and return
+#' the numerical result.
+#'
+#' @param connection                A connection for connecting to the CDM database using the DatabaseConnector::connect(connectionDetails) function.
+#' @param connectionDetails         A connectionDetails object for connecting to the CDM database.
+#' @param check                     The data quality check
+#' @param checkDescription          The description of the data quality check
+#' @param sql                       The fully qualified sql for the data quality check
+#' @param outputFolder              The folder to output logs and SQL files to.
+#' @param patEncSql                 The SQL for patient and encounter statistics
+#' @param cdmVersion                The CDM version (e.g., "5.3", "5.4")
+#' @param resume                    Whether to resume from existing Andromeda files
+#' @param computeDrift              Whether to run the temporal drift extension on numeric checks. Default TRUE.
+#'
+#' @return A dataframe containing the check results
+#'
+#' @keywords internal
 .processCheck <- function(connection,
                           connectionDetails,
                           check,

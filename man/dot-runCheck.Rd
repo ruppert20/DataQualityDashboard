@@ -18,10 +18,14 @@
   cohortDatabaseSchema,
   cohortTableName,
   cohortDefinitionId,
+  cohortFilterType,
+  cohortHasDatetime,
+  cdmVersion,
   outputFolder,
   sqlOnlyUnionCount,
   sqlOnlyIncrementalInsert,
-  sqlOnly
+  sqlOnly,
+  computeDrift = TRUE
 )
 }
 \arguments{
@@ -51,6 +55,12 @@
 
 \item{cohortDefinitionId}{The cohort definition id for the cohort you wish to run the DQD on. The package assumes a standard OHDSI cohort table called 'Cohort'}
 
+\item{cohortFilterType}{How to filter records by cohort dates (PersonOnly, PersonDate, PersonDateTime)}
+
+\item{cohortHasDatetime}{Whether the cohort table has datetime columns (cohort_start_datetime, cohort_end_datetime)}
+
+\item{cdmVersion}{The CDM version (e.g., "5.3", "5.4")}
+
 \item{outputFolder}{The folder to output logs and SQL files to}
 
 \item{sqlOnlyUnionCount}{(OPTIONAL) How many SQL commands to union before inserting them into output table (speeds processing when queries done in parallel). Default is 1.}
@@ -58,6 +68,8 @@
 \item{sqlOnlyIncrementalInsert}{(OPTIONAL) Boolean to determine whether insert check results and associated metadata into output table.  Default is FALSE (for backwards compatability to <= v2.2.0)}
 
 \item{sqlOnly}{Should the SQLs be executed (FALSE) or just returned (TRUE)?}
+
+\item{computeDrift}{Whether to compute data drift metrics for numeric checks. Default TRUE.}
 }
 \value{
 A dataframe containing the check results or SQL queries (NULL if sqlOnlyIncrementalInsert is TRUE)

@@ -2,7 +2,8 @@
 % Please edit documentation in R/processCheck.R
 \name{.processCheck}
 \alias{.processCheck}
-\title{Internal function to send the fully qualified sql to the database and return the numerical result.}
+\title{Internal function to send the fully qualified sql to the database and return
+the numerical result.}
 \usage{
 .processCheck(
   connection,
@@ -10,7 +11,11 @@
   check,
   checkDescription,
   sql,
-  outputFolder
+  outputFolder,
+  patEncSql,
+  cdmVersion = "5.4",
+  resume = TRUE,
+  computeDrift = TRUE
 )
 }
 \arguments{
@@ -25,11 +30,20 @@
 \item{sql}{The fully qualified sql for the data quality check}
 
 \item{outputFolder}{The folder to output logs and SQL files to.}
+
+\item{patEncSql}{The SQL for patient and encounter statistics}
+
+\item{cdmVersion}{The CDM version (e.g., "5.3", "5.4")}
+
+\item{resume}{Whether to resume from existing Andromeda files}
+
+\item{computeDrift}{Whether to run the temporal drift extension on numeric checks. Default TRUE.}
 }
 \value{
 A dataframe containing the check results
 }
 \description{
-Internal function to send the fully qualified sql to the database and return the numerical result.
+Internal function to send the fully qualified sql to the database and return
+the numerical result.
 }
 \keyword{internal}

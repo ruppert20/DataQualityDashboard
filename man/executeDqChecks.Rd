@@ -27,12 +27,14 @@ executeDqChecks(
   cohortDefinitionId = c(),
   cohortDatabaseSchema = resultsDatabaseSchema,
   cohortTableName = "cohort",
+  cohortFilterType = "PersonOnly",
   tablesToExclude = c("CONCEPT", "VOCABULARY", "CONCEPT_ANCESTOR",
     "CONCEPT_RELATIONSHIP", "CONCEPT_CLASS", "CONCEPT_SYNONYM", "RELATIONSHIP", "DOMAIN"),
   cdmVersion = "5.3",
   tableCheckThresholdLoc = "default",
   fieldCheckThresholdLoc = "default",
-  conceptCheckThresholdLoc = "default"
+  conceptCheckThresholdLoc = "default",
+  computeDrift = TRUE
 )
 }
 \arguments{
@@ -81,6 +83,12 @@ with the fields cohort_definition_id and subject_id.}
 
 \item{cohortTableName}{The name of the cohort table. Defaults to `cohort`.}
 
+\item{cohortFilterType}{How to filter records by cohort dates. Options are:
+- "PersonOnly": Filter only by person_id (no date filtering)
+- "PersonDate": Filter by person_id AND date columns within cohort period
+- "PersonDateTime": Filter by person_id AND datetime columns within cohort period
+Default is "PersonOnly".}
+
 \item{tablesToExclude}{(OPTIONAL) Choose which CDM tables to exclude from the execution.}
 
 \item{cdmVersion}{The CDM version to target for the data source. Options are "5.2", "5.3", or "5.4". By default, "5.3" is used.}
@@ -90,6 +98,8 @@ with the fields cohort_definition_id and subject_id.}
 \item{fieldCheckThresholdLoc}{The location of the threshold file for evaluating the field checks. If not specified the default thresholds will be applied.}
 
 \item{conceptCheckThresholdLoc}{The location of the threshold file for evaluating the concept checks. If not specified the default thresholds will be applied.}
+
+\item{computeDrift}{Boolean to enable per-concept temporal data drift analysis (PSI, Wasserstein, JSD vs. origin and current-regime baselines; bcp regime detection) on numeric checks. Adds three CSVs alongside the existing numeric stats outputs. Default is TRUE.}
 }
 \value{
 A list object of results

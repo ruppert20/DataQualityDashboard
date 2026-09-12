@@ -54,5 +54,5 @@ Suggests:
     duckdb,
     R.utils,
     devtools
-RoxygenNote: 7.3.2
 Encoding: UTF-8
+Config/roxygen2/version: 8.1.0

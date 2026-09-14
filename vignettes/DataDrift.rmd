@@ -35,6 +35,16 @@ To disable:
 executeDqChecks(..., computeDrift = FALSE)
 ```
 
+Two user-facing tuning parameters live on `executeDqChecks()`:
+
+- `computeDrift` (default `TRUE`) — toggle the whole drift extension.
+- `minRegimeMonths` (default `3`) — minimum duration for a bcp-detected
+  segment to count as a real regime. Shorter segments are merged into an
+  adjacent regime and their months are flagged as anomalies instead. Raise
+  this to collapse short instability periods into "anomaly" territory;
+  lower to `1` to disable merging and expose every bcp posterior spike as
+  its own regime.
+
 # Methods
 
 For each (concept, unit) group, values are bucketed by calendar month.
@@ -55,6 +65,14 @@ monthly mean and standard deviation. It returns a posterior probability at
 each month that a regime change occurred, and months are segmented into
 regimes at posterior > 0.5. For each regime, a pooled histogram over the
 regime's months serves as the "current normal" baseline.
+
+After bcp's initial segmentation, any segment shorter than
+`minRegimeMonths` (default 3) is merged into an adjacent regime — into
+the previous one, or forward into regime 2 if the first regime is too
+short. This suppresses transient one-month "regimes" that are really
+just anomalies. The merged-out months keep their high `psi_current`
+against the enlarged regime baseline, so they surface via `is_anomaly`
+instead of being lost.
 
 Because `bcp`'s convention is that `posterior.prob[i]` is the probability of
 a change *between* month *i* and *i+1*, the `is_regime_start` flag is derived

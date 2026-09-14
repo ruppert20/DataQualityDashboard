@@ -78,6 +78,7 @@ calculate_mode <- function(x) {
 #' @param cdmVersion                The CDM version (e.g., "5.3", "5.4")
 #' @param resume                    Whether to resume from existing Andromeda files
 #' @param computeDrift              Whether to run the temporal drift extension on numeric checks. Default TRUE.
+#' @param minRegimeMonths           Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and their months flagged as anomalies. Default 3.
 #'
 #' @return A dataframe containing the check results
 #'
@@ -89,9 +90,10 @@ calculate_mode <- function(x) {
                           sql,
                           outputFolder,
                           patEncSql,
-                          cdmVersion = "5.4",
-                          resume = TRUE,
-                          computeDrift = TRUE) {
+                          cdmVersion,
+                          resume,
+                          computeDrift,
+                          minRegimeMonths) {
   singleThreaded <- TRUE
   start <- Sys.time()
   if (is.null(connection)) {
@@ -283,7 +285,8 @@ calculate_mode <- function(x) {
               # the entire check via the warning handler at the bottom of this function.
               tryCatch(
                 withCallingHandlers(
-                  .computeDrift(qData = qData, baseFilePath = baseFilePath),
+                  .computeDrift(qData = qData, baseFilePath = baseFilePath,
+                                minRegimeMonths = minRegimeMonths),
                   warning = function(w) {
                     ParallelLogger::logInfo(sprintf(
                       "Drift (non-fatal) warning for %s: %s", check_name, w$message))

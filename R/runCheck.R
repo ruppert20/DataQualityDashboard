@@ -37,6 +37,8 @@
 #' @param sqlOnlyIncrementalInsert  (OPTIONAL) Boolean to determine whether insert check results and associated metadata into output table.  Default is FALSE (for backwards compatability to <= v2.2.0)
 #' @param sqlOnly                   Should the SQLs be executed (FALSE) or just returned (TRUE)?
 #' @param computeDrift              Whether to compute data drift metrics for numeric checks. Default TRUE.
+#' @param minRegimeMonths           Minimum months a bcp segment must span to count as a real regime; shorter segments merge into an adjacent regime and their months are flagged as anomalies. Default 3.
+#' @param resume                    Whether to resume from existing Andromeda cache files. Default TRUE.
 #'
 #' @return A dataframe containing the check results or SQL queries (NULL if sqlOnlyIncrementalInsert is TRUE)
 #'
@@ -64,7 +66,9 @@
                       sqlOnlyUnionCount,
                       sqlOnlyIncrementalInsert,
                       sqlOnly,
-                      computeDrift = TRUE) {
+                      computeDrift,
+                      minRegimeMonths,
+                      resume) {
   ParallelLogger::logInfo(sprintf("Processing check description: %s", checkDescription$checkName))
 
   filterExpression <- sprintf(
@@ -145,7 +149,9 @@
           outputFolder = outputFolder,
           patEncSql = patEncSql,
           cdmVersion = cdmVersion,
-          computeDrift = computeDrift
+          resume = resume,
+          computeDrift = computeDrift,
+          minRegimeMonths = minRegimeMonths
         )
       }
     })

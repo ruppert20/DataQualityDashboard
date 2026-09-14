@@ -35,6 +35,12 @@ per-month drift scores are flagged as anomalies when they exceed threshold.
   data volume — puts the most-impactful concepts at the top of the
   dashboard.
 - Additional Imports: `Kendall`, `diptest`.
+- **`minRegimeMonths` parameter** on `executeDqChecks()` (default 3):
+  minimum duration for a bcp-detected segment to count as a real regime.
+  Shorter segments are merged into an adjacent regime and their months
+  are flagged as anomalies instead. Prevents noisy 1-month "regimes"
+  from cluttering the regime-change list while still surfacing the
+  transient months via `is_anomaly`. Set to `1` to disable merging.
 
 DataQualityDashboard 2.8.3
 ==========================

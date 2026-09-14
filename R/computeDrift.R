@@ -33,6 +33,11 @@
 #' @param bcpThreshold      posterior probability above which a month starts
 #'                          a new regime (default 0.5).
 #' @param driftPsiThreshold PSI threshold for the anomaly flag (default 0.25).
+#' @param minRegimeMonths   minimum duration (in months) for a bcp-detected
+#'                          segment to count as a real regime. Segments
+#'                          shorter than this are merged into an adjacent
+#'                          regime and the affected months are flagged as
+#'                          anomalies instead. Default 3.
 #'
 #' @return invisibly, a list with elements `monthly`, `summary`, `histogram`.
 #'
@@ -46,7 +51,8 @@
                           originWindowMonths = 12,
                           nBins = 10,
                           bcpThreshold = 0.5,
-                          driftPsiThreshold = 0.25) {
+                          driftPsiThreshold = 0.25,
+                          minRegimeMonths) {
 
   emptyOutputs <- list(
     monthly = .emptyDriftMonthly(),
@@ -96,7 +102,7 @@
     res <- tryCatch(
       .driftForGroup(grp, cid, uid,
                      minMonthObs, originWindowMonths, nBins,
-                     bcpThreshold, driftPsiThreshold),
+                     bcpThreshold, driftPsiThreshold, minRegimeMonths),
       error = function(e) {
         ParallelLogger::logWarn(sprintf(
           "Drift computation failed for concept=%s unit=%s: %s",
@@ -125,7 +131,8 @@
 
 .driftForGroup <- function(grp, cid, uid,
                            minMonthObs, originWindowMonths, nBins,
-                           bcpThreshold, driftPsiThreshold) {
+                           bcpThreshold, driftPsiThreshold,
+                           minRegimeMonths) {
 
   if (nrow(grp) == 0) return(NULL)
 
@@ -238,6 +245,17 @@
       lagged <- posterior_here[-length(posterior_here)] > bcpThreshold
       lagged[is.na(lagged)] <- FALSE
       is_start[-1] <- is_start[-1] | lagged
+    }
+    # Merge segments shorter than minRegimeMonths into an adjacent regime.
+    # bcp can be noisy — a 1-month "regime" is almost always an anomaly, not
+    # a real baseline change. Merged months keep their high psi_current
+    # (computed later against the merged regime baseline) and therefore get
+    # flagged by the is_anomaly logic downstream.
+    if (minRegimeMonths > 1 && sum(is_start) > 1) {
+      starts <- which(is_start)
+      starts <- .mergeShortRegimes(starts, length(is_start), minRegimeMonths)
+      is_start <- logical(length(is_start))
+      is_start[starts] <- TRUE
     }
     monthly$is_regime_start[eligible_idx] <- is_start
     monthly$regime_id[eligible_idx] <- cumsum(is_start)
@@ -392,6 +410,7 @@
     n_regimes = summary_out$n_regimes,
     min_regime_length_months = min_regime_length_months,
     max_regime_length_months = max_regime_length_months,
+    n_anomalous_months = length(anomalous),
     delta_mean_pct = delta_mean_pct,
     delta_sd_pct = delta_sd_pct,
     delta_p5_pct = delta_p5_pct,
@@ -400,7 +419,8 @@
     trend_pvalue_mean = tr_mean$p_value,
     seasonality_significant = seas$significant,
     dip_pvalue_origin = dip_orig$p_value,
-    dip_pvalue_current = dip_curr$p_value
+    dip_pvalue_current = dip_curr$p_value,
+    driftPsiThreshold = driftPsiThreshold
   )
   cls <- .classifyPattern(features)
 
@@ -494,6 +514,28 @@
   if (inherits(x, "Date")) return(format(x, "%Y-%m"))
   # Fallback: coerce via UTC to avoid the system-tz trap.
   format(as.POSIXct(as.character(x), tz = "UTC"), "%Y-%m", tz = "UTC")
+}
+
+
+# Iteratively drop regime-start boundaries whose following segment is shorter
+# than min_length. When the first segment is too short, we merge it into the
+# second (drop the boundary AFTER position 1) since position 1 is always the
+# start of the series. All other short segments merge into the previous regime
+# (drop their own boundary).
+.mergeShortRegimes <- function(starts, n_positions, min_length) {
+  if (length(starts) <= 1) return(starts)
+  repeat {
+    lens <- diff(c(starts, n_positions + 1L))
+    short <- which(lens < min_length)
+    if (length(short) == 0) return(starts)
+    if (length(starts) == 1) return(starts)   # nothing left to merge into
+    i <- short[1]
+    if (i == 1L) {
+      starts <- starts[-2]                    # merge regime 1 forward into 2
+    } else {
+      starts <- starts[-i]                    # merge regime i backward into i-1
+    }
+  }
 }
 
 
@@ -593,12 +635,14 @@
 
   if (isTRUE(f$seasonality_significant)) tags <- c(tags, "seasonal")
 
-  # A transient is a short blip (<= 2 months) against an otherwise long
-  # (>= 6 month) stable regime. PSI magnitude is not capped: real ETL
-  # spikes can push PSI to 5+.
-  is_transient <- !is.na(f$n_regimes) && f$n_regimes >= 2 &&
-                  !is.na(f$min_regime_length_months) &&
-                  f$min_regime_length_months <= 2 &&
+  # A transient is a within-regime blip severe enough that its month PSI
+  # against the surrounding regime baseline is at least 2x the anomaly
+  # threshold. The 2x floor excludes noise-driven borderline anomalies
+  # (psi_current just barely > threshold) that a clean step change may
+  # produce incidentally.
+  is_transient <- !is.na(f$n_anomalous_months) && f$n_anomalous_months >= 1 &&
+                  !is.na(f$max_psi_current) &&
+                  f$max_psi_current > 2 * f$driftPsiThreshold &&
                   !is.na(f$max_regime_length_months) &&
                   f$max_regime_length_months >= 6
   if (is_transient) tags <- c(tags, "transient_anomalies")

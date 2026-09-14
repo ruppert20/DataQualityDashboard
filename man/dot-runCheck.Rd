@@ -25,7 +25,9 @@
   sqlOnlyUnionCount,
   sqlOnlyIncrementalInsert,
   sqlOnly,
-  computeDrift = TRUE
+  computeDrift,
+  minRegimeMonths,
+  resume
 )
 }
 \arguments{
@@ -70,6 +72,10 @@
 \item{sqlOnly}{Should the SQLs be executed (FALSE) or just returned (TRUE)?}
 
 \item{computeDrift}{Whether to compute data drift metrics for numeric checks. Default TRUE.}
+
+\item{minRegimeMonths}{Minimum months a bcp segment must span to count as a real regime; shorter segments merge into an adjacent regime and their months are flagged as anomalies. Default 3.}
+
+\item{resume}{Whether to resume from existing Andromeda cache files. Default TRUE.}
 }
 \value{
 A dataframe containing the check results or SQL queries (NULL if sqlOnlyIncrementalInsert is TRUE)

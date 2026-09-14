@@ -13,9 +13,10 @@ the numerical result.}
   sql,
   outputFolder,
   patEncSql,
-  cdmVersion = "5.4",
-  resume = TRUE,
-  computeDrift = TRUE
+  cdmVersion,
+  resume,
+  computeDrift,
+  minRegimeMonths
 )
 }
 \arguments{
@@ -38,6 +39,8 @@ the numerical result.}
 \item{resume}{Whether to resume from existing Andromeda files}
 
 \item{computeDrift}{Whether to run the temporal drift extension on numeric checks. Default TRUE.}
+
+\item{minRegimeMonths}{Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and their months flagged as anomalies. Default 3.}
 }
 \value{
 A dataframe containing the check results

@@ -11,7 +11,8 @@
   originWindowMonths = 12,
   nBins = 10,
   bcpThreshold = 0.5,
-  driftPsiThreshold = 0.25
+  driftPsiThreshold = 0.25,
+  minRegimeMonths
 )
 }
 \arguments{
@@ -33,6 +34,12 @@ included in drift computation (default 30).}
 a new regime (default 0.5).}
 
 \item{driftPsiThreshold}{PSI threshold for the anomaly flag (default 0.25).}
+
+\item{minRegimeMonths}{minimum duration (in months) for a bcp-detected
+segment to count as a real regime. Segments
+shorter than this are merged into an adjacent
+regime and the affected months are flagged as
+anomalies instead. Default 3.}
 }
 \value{
 invisibly, a list with elements `monthly`, `summary`, `histogram`.

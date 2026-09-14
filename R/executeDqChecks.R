@@ -52,6 +52,8 @@
 #' @param fieldCheckThresholdLoc    The location of the threshold file for evaluating the field checks. If not specified the default thresholds will be applied.
 #' @param conceptCheckThresholdLoc  The location of the threshold file for evaluating the concept checks. If not specified the default thresholds will be applied.
 #' @param computeDrift              Boolean to enable per-concept temporal data drift analysis (PSI, Wasserstein, JSD vs. origin and current-regime baselines; bcp regime detection) on numeric checks. Adds three CSVs alongside the existing numeric stats outputs. Default is TRUE.
+#' @param minRegimeMonths           Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and the affected months are flagged as anomalies instead. Default is 3.
+#' @param resume                    Boolean controlling whether numeric-check Andromeda cache files are reused when present. TRUE (default) reuses cached raw pulls to save warehouse time on re-runs. Set FALSE to force fresh SQL execution.
 #'
 #' @return A list object of results
 #'
@@ -94,7 +96,9 @@ executeDqChecks <- function(connectionDetails,
                             tableCheckThresholdLoc = "default",
                             fieldCheckThresholdLoc = "default",
                             conceptCheckThresholdLoc = "default",
-                            computeDrift = TRUE) {
+                            computeDrift = TRUE,
+                            minRegimeMonths = 3,
+                            resume = TRUE) {
   # Check input -------------------------------------------------------------------------------------------------------------------
   if (!any(class(connectionDetails) %in% c("connectionDetails", "ConnectionDetails"))) {
     stop("connectionDetails must be an object of class 'connectionDetails' or 'ConnectionDetails'.")
@@ -111,6 +115,9 @@ executeDqChecks <- function(connectionDetails,
   stopifnot(is.character(cdmDatabaseSchema), is.character(resultsDatabaseSchema), is.numeric(numThreads))
   stopifnot(is.character(cdmSourceName), is.logical(sqlOnly), is.character(outputFolder), is.logical(verboseMode))
   stopifnot(is.logical(computeDrift), length(computeDrift) == 1)
+  stopifnot(is.numeric(minRegimeMonths), length(minRegimeMonths) == 1,
+            minRegimeMonths >= 1)
+  stopifnot(is.logical(resume), length(resume) == 1)
   stopifnot(is.logical(writeToTable), is.character(checkLevels))
   stopifnot(is.numeric(sqlOnlyUnionCount) && sqlOnlyUnionCount > 0)
   stopifnot(is.logical(sqlOnlyIncrementalInsert))
@@ -348,6 +355,8 @@ executeDqChecks <- function(connectionDetails,
     sqlOnlyIncrementalInsert,
     sqlOnly,
     computeDrift,
+    minRegimeMonths,
+    resume,
     progressBar = TRUE
   )
   ParallelLogger::stopCluster(cluster = cluster)

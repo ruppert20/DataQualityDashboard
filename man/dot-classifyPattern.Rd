@@ -6,12 +6,26 @@
 \usage{
 .classifyPattern(f)
 }
+\arguments{
+\item{f}{Named list of numeric features from `.driftForGroup()` —
+max_psi_origin, max_psi_current, driftPsiThreshold, n_regimes,
+min/max_regime_length_months, n_anomalous_months,
+delta_mean/sd/p5/p95_pct, trend_tau_mean, trend_pvalue_mean,
+seasonality_significant, dip_pvalue_origin, dip_pvalue_current.}
+}
+\value{
+A list with `pattern_type` (character, one label) and
+          `pattern_tags` (character, all matching labels joined by `;`).
+}
 \description{
 Given a set of numeric features summarizing a concept's drift behavior,
 returns a primary `pattern_type` (single string) plus `pattern_tags`
 (semicolon-joined labels of all matching rules). Precedence for the
-primary label goes bimodal > seasonal > trend > step > transient >
-location > scale > tail > gradual, with `stable` short-circuiting the
-whole thing when there is essentially no drift.
+primary label, in order:
+`stable` (short-circuit) > `bimodal_change` > `seasonal` >
+`transient_anomalies` > `scale_shift` > `tail_shift` > `location_shift` >
+`monotonic_trend` > `step_change` > `gradual_drift` (fallback).
+Distributional patterns win over temporal ones because they specify the
+shape of the shift, which drives visualization choice in the dashboard.
 }
 \keyword{internal}

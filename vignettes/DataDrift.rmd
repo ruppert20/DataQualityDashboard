@@ -35,7 +35,7 @@ To disable:
 executeDqChecks(..., computeDrift = FALSE)
 ```
 
-Two user-facing tuning parameters live on `executeDqChecks()`:
+Three user-facing tuning parameters live on `executeDqChecks()`:
 
 - `computeDrift` (default `TRUE`) — toggle the whole drift extension.
 - `minRegimeMonths` (default `3`) — minimum duration for a bcp-detected
@@ -44,6 +44,12 @@ Two user-facing tuning parameters live on `executeDqChecks()`:
   this to collapse short instability periods into "anomaly" territory;
   lower to `1` to disable merging and expose every bcp posterior spike as
   its own regime.
+- `resume` (default `TRUE`) — reuse the Andromeda cache from a previous
+  run of the same numeric check. Since drift shares the same collected
+  frame as `numeric_stats`, this means iterating on drift parameters (e.g.,
+  changing `minRegimeMonths`) does not re-hit the warehouse — the R-side
+  computation just replays against the cached rows. Set `FALSE` to force
+  a fresh SQL pull.
 
 # Methods
 

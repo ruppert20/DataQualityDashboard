@@ -41,6 +41,10 @@ per-month drift scores are flagged as anomalies when they exceed threshold.
   are flagged as anomalies instead. Prevents noisy 1-month "regimes"
   from cluttering the regime-change list while still surfacing the
   transient months via `is_anomaly`. Set to `1` to disable merging.
+- **`resume` parameter** on `executeDqChecks()` (default `TRUE`): promoted
+  from an internal-only default to a public parameter. Controls whether
+  Andromeda cache files from previous numeric-check runs are reused,
+  letting users iterate on drift parameters without re-executing SQL.
 
 DataQualityDashboard 2.8.3
 ==========================

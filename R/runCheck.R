@@ -39,6 +39,7 @@
 #' @param computeDrift              Whether to compute data drift metrics for numeric checks. Default TRUE.
 #' @param minRegimeMonths           Minimum months a bcp segment must span to count as a real regime; shorter segments merge into an adjacent regime and their months are flagged as anomalies. Default 3.
 #' @param resume                    Whether to resume from existing Andromeda cache files. Default TRUE.
+#' @param driftMemoryBudgetBytes    Per-worker memory budget (bytes) for drift subsampling.
 #'
 #' @return A dataframe containing the check results or SQL queries (NULL if sqlOnlyIncrementalInsert is TRUE)
 #'
@@ -68,7 +69,8 @@
                       sqlOnly,
                       computeDrift,
                       minRegimeMonths,
-                      resume) {
+                      resume,
+                      driftMemoryBudgetBytes) {
   ParallelLogger::logInfo(sprintf("Processing check description: %s", checkDescription$checkName))
 
   filterExpression <- sprintf(
@@ -151,7 +153,8 @@
           cdmVersion = cdmVersion,
           resume = resume,
           computeDrift = computeDrift,
-          minRegimeMonths = minRegimeMonths
+          minRegimeMonths = minRegimeMonths,
+          driftMemoryBudgetBytes = driftMemoryBudgetBytes
         )
       }
     })

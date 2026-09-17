@@ -45,6 +45,38 @@ per-month drift scores are flagged as anomalies when they exceed threshold.
   from an internal-only default to a public parameter. Controls whether
   Andromeda cache files from previous numeric-check runs are reused,
   letting users iterate on drift parameters without re-executing SQL.
+- **Memory-adaptive per-month subsampling** for drift on very high-volume
+  concepts (tens of millions of observations). Prevents fatal R crashes
+  from `transport::wasserstein1d` running out of memory. Controlled by
+  `driftMemoryBudgetMB` on `executeDqChecks()`:
+  - `"auto"` (default) — detect free memory via `/proc/meminfo` (Linux),
+    `vm_stat` (macOS), or `wmic` (Windows) and reserve 25% divided by
+    `numThreads`.
+  - Numeric MB value — explicit budget divided by `numThreads`.
+  - `Inf` — disable subsampling (preserves pre-2.9 behavior).
+
+  Per-month cap = `floor(budget / (8 * safetyFactor) / n_months)`,
+  scaling with series length (a 6-month series gets a much larger cap
+  than a 20-year one). Cap is floored at `minMonthObs` so subsampling
+  never demotes a month to insufficient-data.
+
+  Outputs annotate the impact: `n_obs_used` (per month) alongside `n_obs`
+  (original), plus summary columns `subsampled_any`, `pct_obs_used`,
+  `total_obs_original`, `total_obs_used`, `total_obs_excluded`,
+  `memory_budget_mb`, `subsample_cap_per_month`. When no subsampling
+  occurs, `pct_obs_used == 100` and `subsampled_any == FALSE`.
+
+  Effect on statistics: PSI and JSD unaffected (both converge quickly
+  in histogram space); Wasserstein-1 within ~5% at typical caps; bcp
+  regime detection, Mann-Kendall, and ACF unaffected (all operate on
+  monthly mean/SD, not raw values).
+- **Reproducibility banner** at the top of every run's log: DQD version,
+  R version, platform, timestamp with timezone, available memory,
+  resolved drift memory budget, and every non-sensitive input parameter
+  passed to `executeDqChecks()`. `connectionDetails` is deliberately
+  omitted (may hold credentials); only its `$dbms` field is included
+  because it drives SQL dialect translation and does not identify a
+  specific server.
 
 DataQualityDashboard 2.8.3
 ==========================

@@ -38,6 +38,15 @@
 #'                          shorter than this are merged into an adjacent
 #'                          regime and the affected months are flagged as
 #'                          anomalies instead. Default 3.
+#' @param memoryBudgetBytes numeric byte figure. When the total observation
+#'                          count for a (concept, unit) group would push
+#'                          memory past `budget / (8 * safetyFactor)`,
+#'                          months are subsampled to fit. `Inf` (default)
+#'                          disables subsampling.
+#' @param safetyFactor      overhead multiplier applied to the raw
+#'                          byte-per-value figure to account for dplyr
+#'                          intermediate copies, Wasserstein sort buffers,
+#'                          and per-row data.frame overhead. Default 5.
 #'
 #' @return invisibly, a list with elements `monthly`, `summary`, `histogram`.
 #'
@@ -52,7 +61,9 @@
                           nBins = 10,
                           bcpThreshold = 0.5,
                           driftPsiThreshold = 0.25,
-                          minRegimeMonths) {
+                          minRegimeMonths,
+                          memoryBudgetBytes = Inf,
+                          safetyFactor = 5) {
 
   emptyOutputs <- list(
     monthly = .emptyDriftMonthly(),
@@ -102,7 +113,8 @@
     res <- tryCatch(
       .driftForGroup(grp, cid, uid,
                      minMonthObs, originWindowMonths, nBins,
-                     bcpThreshold, driftPsiThreshold, minRegimeMonths),
+                     bcpThreshold, driftPsiThreshold, minRegimeMonths,
+                     memoryBudgetBytes, safetyFactor),
       error = function(e) {
         ParallelLogger::logWarn(sprintf(
           "Drift computation failed for concept=%s unit=%s: %s",
@@ -132,23 +144,71 @@
 .driftForGroup <- function(grp, cid, uid,
                            minMonthObs, originWindowMonths, nBins,
                            bcpThreshold, driftPsiThreshold,
-                           minRegimeMonths) {
+                           minRegimeMonths,
+                           memoryBudgetBytes = Inf,
+                           safetyFactor = 5) {
 
   if (nrow(grp) == 0) return(NULL)
+
+  # ---- Memory-adaptive per-month subsampling ---------------------------------
+  # Adaptive redistribution algorithm: rather than assign every month the
+  # same cap (budget/n_months) and waste allocation on small months that
+  # cannot use it, we iteratively promote "small" months out of the pool
+  # (months whose count already fits under the current fair share). Their
+  # unused portion is redistributed to the remaining "big" months. Result:
+  # small months are never touched, and big months get the maximum sample
+  # size the budget allows.
+  monthly_counts <- table(grp$year_month)
+  n_months <- length(monthly_counts)
+  n_obs_original_by_month <- as.integer(monthly_counts)
+  names(n_obs_original_by_month) <- names(monthly_counts)
+
+  per_month_cap <- .adaptivePerMonthCap(
+    counts = n_obs_original_by_month,
+    memoryBudgetBytes = memoryBudgetBytes,
+    safetyFactor = safetyFactor,
+    minMonthObs = minMonthObs
+  )
+  big_month_mask <- n_obs_original_by_month > per_month_cap
+
+  if (any(big_month_mask)) {
+    big_cap <- max(per_month_cap[big_month_mask])
+    ParallelLogger::logInfo(sprintf(
+      paste("Drift subsampling concept=%s unit=%s: %d/%d months capped at",
+            "%d obs (budget %.0f MB, safety factor %d, small months",
+            "kept intact)"),
+      as.character(cid), as.character(uid),
+      sum(big_month_mask), n_months,
+      big_cap, memoryBudgetBytes / 1024^2, safetyFactor))
+    # Random subsample per month using base-R split+sample. Memory-efficient
+    # (only allocates integer row indices, then subsets once at the end).
+    rows_by_month <- split(seq_len(nrow(grp)), grp$year_month)
+    kept_rows <- unlist(lapply(names(rows_by_month), function(m) {
+      rows <- rows_by_month[[m]]
+      cap <- per_month_cap[m]
+      if (length(rows) <= cap) rows else sample(rows, size = cap, replace = FALSE)
+    }), use.names = FALSE)
+    grp <- grp[sort(kept_rows), , drop = FALSE]
+  }
 
   monthly_raw <- grp %>%
     dplyr::group_by(.data$year_month) %>%
     dplyr::summarise(
-      n_obs = dplyr::n(),
+      n_obs_used = dplyr::n(),
       m_mean = mean(.data$value_as_number, na.rm = TRUE),
       m_sd = stats::sd(.data$value_as_number, na.rm = TRUE),
       values = list(.data$value_as_number),
       .groups = "drop"
     ) %>%
-    dplyr::arrange(.data$year_month)
+    dplyr::arrange(.data$year_month) %>%
+    dplyr::mutate(
+      n_obs = as.integer(n_obs_original_by_month[.data$year_month])
+    )
 
   if (nrow(monthly_raw) < 2) return(NULL)
 
+  # Eligibility is based on ORIGINAL n_obs — subsampling never demotes a month
+  # into insufficient-data territory because the cap is floored at minMonthObs.
   eligible <- monthly_raw %>% dplyr::filter(.data$n_obs >= minMonthObs)
   if (nrow(eligible) == 0) return(NULL)
 
@@ -297,7 +357,8 @@
       unit_concept_id = uid
     ) %>%
     dplyr::select(
-      "measurement_concept_id", "unit_concept_id", "year_month", "n_obs",
+      "measurement_concept_id", "unit_concept_id", "year_month",
+      "n_obs", "n_obs_used",
       "psi_origin", "wasserstein_origin", "jsd_origin",
       "psi_current", "wasserstein_current", "jsd_current",
       "bcp_posterior", "regime_id", "regime_length_months",
@@ -445,6 +506,28 @@
   summary_out$pattern_type <- cls$pattern_type
   summary_out$pattern_tags <- cls$pattern_tags
 
+  # Subsampling annotations (per user request): report how much of the raw
+  # data actually fed the drift calculation. If nothing was subsampled,
+  # n_obs_used == n_obs and pct_obs_used == 100.
+  total_obs_original <- sum(monthly_out$n_obs, na.rm = TRUE)
+  total_obs_used <- sum(monthly_out$n_obs_used, na.rm = TRUE)
+  summary_out$total_obs_original <- as.integer(total_obs_original)
+  summary_out$total_obs_used <- as.integer(total_obs_used)
+  summary_out$total_obs_excluded <- as.integer(total_obs_original - total_obs_used)
+  summary_out$pct_obs_used <- if (total_obs_original > 0)
+    round(100 * total_obs_used / total_obs_original, 4) else NA_real_
+  summary_out$subsampled_any <- any(monthly_out$n_obs_used < monthly_out$n_obs,
+                                    na.rm = TRUE)
+  summary_out$memory_budget_mb <- if (is.finite(memoryBudgetBytes))
+    round(memoryBudgetBytes / 1024^2, 2) else NA_real_
+  # subsample_cap_big_months: the cap applied to any month that was subsampled
+  # (all big months share the same cap under adaptive redistribution). NA if
+  # subsampling was disabled or no month was big enough to be capped.
+  big_diff <- monthly_out$n_obs > monthly_out$n_obs_used
+  summary_out$n_months_subsampled <- as.integer(sum(big_diff, na.rm = TRUE))
+  summary_out$subsample_cap_big_months <- if (any(big_diff, na.rm = TRUE))
+    as.integer(max(monthly_out$n_obs_used[big_diff])) else NA_integer_
+
   list(
     monthly = monthly_out,
     summary = summary_out,
@@ -514,6 +597,177 @@
   if (inherits(x, "Date")) return(format(x, "%Y-%m"))
   # Fallback: coerce via UTC to avoid the system-tz trap.
   format(as.POSIXct(as.character(x), tz = "UTC"), "%Y-%m", tz = "UTC")
+}
+
+
+# Cross-platform "how much RAM can I use right now" probe.
+# Linux reads /proc/meminfo (MemAvailable is what the kernel thinks apps can
+# claim without swapping); macOS parses vm_stat's free + inactive pages;
+# Windows queries FreePhysicalMemory via wmic. Returns NA on any failure,
+# and the caller falls back to no-subsampling in that case.
+.availableMemoryBytes <- function() {
+  sysname <- unname(Sys.info()["sysname"])
+  bytes <- NA_real_
+  tryCatch({
+    if (sysname == "Linux") {
+      meminfo <- readLines("/proc/meminfo", warn = FALSE)
+      line <- grep("^MemAvailable:", meminfo, value = TRUE)
+      if (length(line) > 0) {
+        kb <- as.numeric(regmatches(line, regexpr("[0-9]+", line)))
+        bytes <- kb * 1024
+      }
+    } else if (sysname == "Darwin") {
+      out <- suppressWarnings(system("vm_stat", intern = TRUE,
+                                      ignore.stderr = TRUE))
+      page_line <- grep("page size of", out, value = TRUE)
+      free_line <- grep("^Pages free:", out, value = TRUE)
+      inactive_line <- grep("^Pages inactive:", out, value = TRUE)
+      if (length(page_line) && length(free_line)) {
+        page_size <- as.numeric(regmatches(page_line,
+                                           regexpr("[0-9]+", page_line)))
+        get_pages <- function(l) {
+          v <- regmatches(l, regexpr("[0-9]+", l))
+          if (length(v) == 0) 0 else as.numeric(v)
+        }
+        bytes <- (get_pages(free_line) + get_pages(inactive_line)) * page_size
+      }
+    } else if (sysname == "Windows") {
+      out <- suppressWarnings(system(
+        "wmic OS get FreePhysicalMemory /value",
+        intern = TRUE, ignore.stderr = TRUE))
+      line <- grep("FreePhysicalMemory=", out, value = TRUE)
+      if (length(line) > 0) {
+        kb <- as.numeric(sub("FreePhysicalMemory=", "", line))
+        bytes <- kb * 1024
+      }
+    }
+  }, error = function(e) invisible(NULL))
+  bytes
+}
+
+
+# Emit a reproducibility banner to the DQD log at run start: DQD version,
+# R version, platform, available memory, and every non-sensitive input
+# parameter of executeDqChecks(). connectionDetails is explicitly excluded
+# (may hold server/user/password); only its $dbms field is logged since that
+# is the DB dialect used for SqlRender translation and does not identify a
+# specific server. If the caller wants full redaction, they can pass
+# connectionDetails = NULL after their own diagnostics.
+.logRunConfig <- function(params, connectionDetails,
+                          driftMemoryBudgetBytes, availableBytes) {
+  ParallelLogger::logInfo(
+    "======= DataQualityDashboard run configuration =======")
+  ParallelLogger::logInfo(sprintf(
+    "DQD version: %s",
+    tryCatch(as.character(utils::packageVersion("DataQualityDashboard")),
+             error = function(e) "unknown")))
+  ParallelLogger::logInfo(sprintf(
+    "R: %s.%s (%s)",
+    R.Version()$major, R.Version()$minor, R.Version()$platform))
+  si <- Sys.info()
+  ParallelLogger::logInfo(sprintf(
+    "Platform: %s %s (%s)",
+    si["sysname"], si["release"], si["machine"]))
+  ParallelLogger::logInfo(sprintf(
+    "Run time: %s (%s)",
+    format(Sys.time(), "%Y-%m-%d %H:%M:%S"), Sys.timezone()))
+
+  if (is.na(availableBytes)) {
+    ParallelLogger::logInfo(
+      "Available memory: could not detect (subsampling will be disabled)")
+  } else {
+    ParallelLogger::logInfo(sprintf(
+      "Available memory at start: %.2f GB",
+      availableBytes / 1024^3))
+  }
+  ParallelLogger::logInfo(sprintf(
+    "driftMemoryBudgetBytes (resolved): %s",
+    if (is.infinite(driftMemoryBudgetBytes)) "Inf (subsampling disabled)"
+    else sprintf("%.2f MB per worker", driftMemoryBudgetBytes / 1024^2)))
+  ParallelLogger::logInfo(sprintf(
+    "connectionDetails$dbms: %s",
+    tryCatch(as.character(connectionDetails$dbms),
+             error = function(e) "unknown")))
+
+  ParallelLogger::logInfo("--- input parameters ---")
+  # Excluded: connectionDetails (may hold secrets).
+  for (nm in sort(names(params))) {
+    val <- params[[nm]]
+    if (is.null(val)) {
+      s <- "NULL"
+    } else if (is.function(val)) {
+      s <- "<function>"
+    } else if (length(val) == 0) {
+      s <- sprintf("%s()", class(val)[1])
+    } else if (length(val) == 1) {
+      s <- format(val)
+    } else if (length(val) <= 20) {
+      s <- paste(format(val), collapse = ", ")
+    } else {
+      s <- sprintf("%s[1:%d]", class(val)[1], length(val))
+    }
+    ParallelLogger::logInfo(sprintf("  %s = %s", nm, s))
+  }
+  ParallelLogger::logInfo(
+    "======================================================")
+}
+
+
+# Resolve a user-supplied budget spec ("auto" | numeric MB | Inf) into a byte
+# figure for a single worker. "auto" queries the OS and takes `share` (default
+# 0.25 = 25%) of what's currently available, then divides by numThreads so
+# parallel workers don't collectively exceed the budget. Returns Inf if the
+# probe fails, which disables subsampling.
+.resolveMemoryBudgetBytes <- function(spec, numThreads = 1L, share = 0.25) {
+  if (is.character(spec) && length(spec) == 1 && spec == "auto") {
+    avail <- .availableMemoryBytes()
+    if (is.na(avail)) return(Inf)
+    return(avail * share / max(numThreads, 1L))
+  }
+  if (is.numeric(spec) && length(spec) == 1 && !is.na(spec)) {
+    if (is.infinite(spec)) return(Inf)
+    return(spec * 1024 * 1024 / max(numThreads, 1L))
+  }
+  Inf
+}
+
+
+# Adaptive per-month cap allocation. Given a named vector of monthly
+# observation counts and a total-value budget, iteratively promote months
+# already below the current "fair share" out of the shared pool and
+# redistribute their unused budget to the remaining big months. Returns a
+# named integer vector of caps (same order as `counts`); a month's kept
+# sample size will be `min(counts[m], cap[m])`. Small months' caps equal
+# their own count (i.e. never subsampled). Big months share the remainder
+# equally. If `memoryBudgetBytes` is Inf, every cap is `.Machine$integer.max`.
+.adaptivePerMonthCap <- function(counts, memoryBudgetBytes,
+                                 safetyFactor, minMonthObs) {
+  n_m <- length(counts)
+  if (n_m == 0) return(integer(0))
+  if (!is.finite(memoryBudgetBytes)) {
+    out <- rep(.Machine$integer.max, n_m)
+    names(out) <- names(counts)
+    return(out)
+  }
+  allowed_total <- floor(memoryBudgetBytes / (8 * safetyFactor))
+  is_small <- logical(n_m)
+  remaining <- allowed_total
+  repeat {
+    n_big <- n_m - sum(is_small)
+    if (n_big == 0) break
+    fair_share <- remaining / n_big
+    new_small <- !is_small & (counts <= fair_share)
+    if (!any(new_small)) break
+    remaining <- remaining - sum(counts[new_small])
+    is_small <- is_small | new_small
+  }
+  n_big <- n_m - sum(is_small)
+  big_cap <- if (n_big > 0) max(minMonthObs, floor(remaining / n_big))
+             else .Machine$integer.max
+  caps <- as.integer(counts)         # small months: cap = own count (untouched)
+  caps[!is_small] <- big_cap         # big months: shared cap
+  names(caps) <- names(counts)
+  caps
 }
 
 
@@ -727,6 +981,7 @@
     unit_concept_id = character(0),
     year_month = character(0),
     n_obs = integer(0),
+    n_obs_used = integer(0),
     psi_origin = numeric(0),
     wasserstein_origin = numeric(0),
     jsd_origin = numeric(0),
@@ -783,6 +1038,14 @@
     priority_score = numeric(0),
     pattern_type = character(0),
     pattern_tags = character(0),
+    total_obs_original = integer(0),
+    total_obs_used = integer(0),
+    total_obs_excluded = integer(0),
+    pct_obs_used = numeric(0),
+    subsampled_any = logical(0),
+    memory_budget_mb = numeric(0),
+    n_months_subsampled = integer(0),
+    subsample_cap_big_months = integer(0),
     stringsAsFactors = FALSE
   )
 }

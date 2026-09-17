@@ -54,6 +54,7 @@
 #' @param computeDrift              Boolean to enable per-concept temporal data drift analysis (PSI, Wasserstein, JSD vs. origin and current-regime baselines; bcp regime detection) on numeric checks. Adds three CSVs alongside the existing numeric stats outputs. Default is TRUE.
 #' @param minRegimeMonths           Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and the affected months are flagged as anomalies instead. Default is 3.
 #' @param resume                    Boolean controlling whether numeric-check Andromeda cache files are reused when present. TRUE (default) reuses cached raw pulls to save warehouse time on re-runs. Set FALSE to force fresh SQL execution.
+#' @param driftMemoryBudgetMB       Memory budget (in MB) for the drift computation, used to decide when to subsample months for concepts too large to fit in RAM. Accepts `"auto"` (default, detects free system memory and reserves 25% divided by `numThreads`), a numeric MB value (divided by `numThreads` for per-worker share), or `Inf` to disable subsampling. When subsampling occurs, per-concept summary rows record `subsampled_any`, `pct_obs_used`, `subsample_cap_per_month`, and per-month rows record both `n_obs` (original) and `n_obs_used`.
 #'
 #' @return A list object of results
 #'
@@ -98,7 +99,8 @@ executeDqChecks <- function(connectionDetails,
                             conceptCheckThresholdLoc = "default",
                             computeDrift = TRUE,
                             minRegimeMonths = 3,
-                            resume = TRUE) {
+                            resume = TRUE,
+                            driftMemoryBudgetMB = "auto") {
   # Check input -------------------------------------------------------------------------------------------------------------------
   if (!any(class(connectionDetails) %in% c("connectionDetails", "ConnectionDetails"))) {
     stop("connectionDetails must be an object of class 'connectionDetails' or 'ConnectionDetails'.")
@@ -118,6 +120,19 @@ executeDqChecks <- function(connectionDetails,
   stopifnot(is.numeric(minRegimeMonths), length(minRegimeMonths) == 1,
             minRegimeMonths >= 1)
   stopifnot(is.logical(resume), length(resume) == 1)
+  stopifnot(
+    length(driftMemoryBudgetMB) == 1 &&
+      (identical(driftMemoryBudgetMB, "auto") ||
+       (is.numeric(driftMemoryBudgetMB) &&
+        (is.infinite(driftMemoryBudgetMB) || driftMemoryBudgetMB > 0)))
+  )
+
+  # Resolve "auto" / numeric MB / Inf into a per-worker byte budget. When
+  # detection fails we fall through to Inf (no subsampling). Any diagnostic
+  # message about detection failure is emitted via .logRunConfig() below.
+  driftMemoryBudgetBytes <- .resolveMemoryBudgetBytes(
+    driftMemoryBudgetMB, numThreads = numThreads, share = 0.25
+  )
   stopifnot(is.logical(writeToTable), is.character(checkLevels))
   stopifnot(is.numeric(sqlOnlyUnionCount) && sqlOnlyUnionCount > 0)
   stopifnot(is.logical(sqlOnlyIncrementalInsert))
@@ -148,6 +163,48 @@ executeDqChecks <- function(connectionDetails,
   if (length(checkNames) > 0 && !.containsNAchecks(checkNames)) {
     warning("Missing check names to calculate the 'Not Applicable' status.")
   }
+
+  # Reproducibility banner: log environment + all input parameters (except
+  # connectionDetails which may contain credentials). Users re-running months
+  # later can pull this out of the DQD log to reconstruct the exact call.
+  .logRunConfig(
+    params = list(
+      cdmDatabaseSchema = cdmDatabaseSchema,
+      resultsDatabaseSchema = resultsDatabaseSchema,
+      vocabDatabaseSchema = vocabDatabaseSchema,
+      cdmSourceName = cdmSourceName,
+      numThreads = numThreads,
+      sqlOnly = sqlOnly,
+      sqlOnlyUnionCount = sqlOnlyUnionCount,
+      sqlOnlyIncrementalInsert = sqlOnlyIncrementalInsert,
+      outputFolder = outputFolder,
+      outputFile = outputFile,
+      verboseMode = verboseMode,
+      writeToTable = writeToTable,
+      writeTableName = writeTableName,
+      writeToCsv = writeToCsv,
+      csvFile = csvFile,
+      checkLevels = checkLevels,
+      checkNames = checkNames,
+      checkSeverity = checkSeverity,
+      cohortDefinitionId = cohortDefinitionId,
+      cohortDatabaseSchema = cohortDatabaseSchema,
+      cohortTableName = cohortTableName,
+      cohortFilterType = cohortFilterType,
+      tablesToExclude = tablesToExclude,
+      cdmVersion = cdmVersion,
+      tableCheckThresholdLoc = tableCheckThresholdLoc,
+      fieldCheckThresholdLoc = fieldCheckThresholdLoc,
+      conceptCheckThresholdLoc = conceptCheckThresholdLoc,
+      computeDrift = computeDrift,
+      minRegimeMonths = minRegimeMonths,
+      resume = resume,
+      driftMemoryBudgetMB = driftMemoryBudgetMB
+    ),
+    connectionDetails = connectionDetails,
+    driftMemoryBudgetBytes = driftMemoryBudgetBytes,
+    availableBytes = .availableMemoryBytes()
+  )
 
   # temporary patch to work around vroom 1.6.4 bug
   readr::local_edition(1)
@@ -357,6 +414,7 @@ executeDqChecks <- function(connectionDetails,
     computeDrift,
     minRegimeMonths,
     resume,
+    driftMemoryBudgetBytes,
     progressBar = TRUE
   )
   ParallelLogger::stopCluster(cluster = cluster)

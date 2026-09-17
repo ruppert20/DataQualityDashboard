@@ -27,7 +27,8 @@
   sqlOnly,
   computeDrift,
   minRegimeMonths,
-  resume
+  resume,
+  driftMemoryBudgetBytes
 )
 }
 \arguments{
@@ -76,6 +77,8 @@
 \item{minRegimeMonths}{Minimum months a bcp segment must span to count as a real regime; shorter segments merge into an adjacent regime and their months are flagged as anomalies. Default 3.}
 
 \item{resume}{Whether to resume from existing Andromeda cache files. Default TRUE.}
+
+\item{driftMemoryBudgetBytes}{Per-worker memory budget (bytes) for drift subsampling.}
 }
 \value{
 A dataframe containing the check results or SQL queries (NULL if sqlOnlyIncrementalInsert is TRUE)

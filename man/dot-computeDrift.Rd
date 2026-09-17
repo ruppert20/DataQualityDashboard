@@ -12,7 +12,9 @@
   nBins = 10,
   bcpThreshold = 0.5,
   driftPsiThreshold = 0.25,
-  minRegimeMonths
+  minRegimeMonths,
+  memoryBudgetBytes = Inf,
+  safetyFactor = 5
 )
 }
 \arguments{
@@ -40,6 +42,17 @@ segment to count as a real regime. Segments
 shorter than this are merged into an adjacent
 regime and the affected months are flagged as
 anomalies instead. Default 3.}
+
+\item{memoryBudgetBytes}{numeric byte figure. When the total observation
+count for a (concept, unit) group would push
+memory past `budget / (8 * safetyFactor)`,
+months are subsampled to fit. `Inf` (default)
+disables subsampling.}
+
+\item{safetyFactor}{overhead multiplier applied to the raw
+byte-per-value figure to account for dplyr
+intermediate copies, Wasserstein sort buffers,
+and per-row data.frame overhead. Default 5.}
 }
 \value{
 invisibly, a list with elements `monthly`, `summary`, `histogram`.

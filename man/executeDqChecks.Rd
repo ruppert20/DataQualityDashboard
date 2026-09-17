@@ -36,7 +36,8 @@ executeDqChecks(
   conceptCheckThresholdLoc = "default",
   computeDrift = TRUE,
   minRegimeMonths = 3,
-  resume = TRUE
+  resume = TRUE,
+  driftMemoryBudgetMB = "auto"
 )
 }
 \arguments{
@@ -106,6 +107,8 @@ Default is "PersonOnly".}
 \item{minRegimeMonths}{Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and the affected months are flagged as anomalies instead. Default is 3.}
 
 \item{resume}{Boolean controlling whether numeric-check Andromeda cache files are reused when present. TRUE (default) reuses cached raw pulls to save warehouse time on re-runs. Set FALSE to force fresh SQL execution.}
+
+\item{driftMemoryBudgetMB}{Memory budget (in MB) for the drift computation, used to decide when to subsample months for concepts too large to fit in RAM. Accepts `"auto"` (default, detects free system memory and reserves 25% divided by `numThreads`), a numeric MB value (divided by `numThreads` for per-worker share), or `Inf` to disable subsampling. When subsampling occurs, per-concept summary rows record `subsampled_any`, `pct_obs_used`, `subsample_cap_per_month`, and per-month rows record both `n_obs` (original) and `n_obs_used`.}
 }
 \value{
 A list object of results

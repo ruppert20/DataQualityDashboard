@@ -79,6 +79,7 @@ calculate_mode <- function(x) {
 #' @param resume                    Whether to resume from existing Andromeda files
 #' @param computeDrift              Whether to run the temporal drift extension on numeric checks. Default TRUE.
 #' @param minRegimeMonths           Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and their months flagged as anomalies. Default 3.
+#' @param driftMemoryBudgetBytes    Per-worker memory budget (in bytes) used to decide when to subsample large months.
 #'
 #' @return A dataframe containing the check results
 #'
@@ -93,7 +94,8 @@ calculate_mode <- function(x) {
                           cdmVersion,
                           resume,
                           computeDrift,
-                          minRegimeMonths) {
+                          minRegimeMonths,
+                          driftMemoryBudgetBytes) {
   singleThreaded <- TRUE
   start <- Sys.time()
   if (is.null(connection)) {
@@ -286,7 +288,8 @@ calculate_mode <- function(x) {
               tryCatch(
                 withCallingHandlers(
                   .computeDrift(qData = qData, baseFilePath = baseFilePath,
-                                minRegimeMonths = minRegimeMonths),
+                                minRegimeMonths = minRegimeMonths,
+                                memoryBudgetBytes = driftMemoryBudgetBytes),
                   warning = function(w) {
                     ParallelLogger::logInfo(sprintf(
                       "Drift (non-fatal) warning for %s: %s", check_name, w$message))

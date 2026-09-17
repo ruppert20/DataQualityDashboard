@@ -50,6 +50,91 @@ Three user-facing tuning parameters live on `executeDqChecks()`:
   changing `minRegimeMonths`) does not re-hit the warehouse — the R-side
   computation just replays against the cached rows. Set `FALSE` to force
   a fresh SQL pull.
+- `driftMemoryBudgetMB` (default `"auto"`) — controls memory-adaptive
+  per-month subsampling for very high-volume concepts. See the
+  **Memory-adaptive subsampling** section below for the full picture.
+  Accepts `"auto"` (detect free system memory, reserve 25% divided by
+  `numThreads`), a numeric MB value (also divided by `numThreads` for the
+  per-worker share), or `Inf` to disable subsampling.
+
+# Memory-adaptive subsampling
+
+Drift materializes a list-column of raw values per month so it can compute
+Wasserstein-1, dip-test, and pooled regime baselines. For most concepts
+that costs a few tens of MB; for very high-volume concepts (tens of
+millions of observations) the peak footprint — list-column + pipeline
+copies + `transport::wasserstein1d` sort buffers — can push a single
+concept past the OS memory limit and crash R with a fatal error.
+
+The `driftMemoryBudgetMB` parameter defends against this. On each
+concept-unit group, `.driftForGroup()`:
+
+1. Probes free system memory via `/proc/meminfo` (Linux), `vm_stat`
+   (macOS), or `wmic FreePhysicalMemory` (Windows). Divides by
+   `numThreads` so parallel workers share the budget fairly.
+2. Converts the byte budget into a total-value budget:
+   `allowed = budget_bytes / (8 * safetyFactor)`.
+   The safety factor (default 5) accounts for dplyr's intermediate
+   copies, Wasserstein's internal buffers, and per-row data.frame
+   overhead. `8` is the byte size of a double.
+3. **Adaptive redistribution.** Rather than dividing `allowed` uniformly
+   across all `n_months` (which wastes allocation on months that don't
+   need it), an iterative pass identifies "small" months whose observation
+   count already fits under the current fair share. Their unused budget
+   is redistributed to the remaining "big" months, and the fair share is
+   recomputed. This continues until every remaining month exceeds the
+   share — at which point they all share the leftover equally.
+4. Small months (those below the fair share) are left **completely
+   untouched**. Big months are subsampled via base-R `sample()` to the
+   shared cap. The cap is floored at `minMonthObs` so subsampling can
+   never demote a month into the insufficient-data category.
+
+**Worked example.** Budget 10 MB, safety=5, 24 months where 6 have only
+40 obs and 18 have 2M obs each:
+
+- `allowed = 10 * 1024² / (8 * 5) = 262,144` values total
+- First-pass fair share = `262,144 / 24 ≈ 10,922`
+- The 6 small months (40 obs each) are promoted — they use `6 * 40 = 240`
+- Remaining budget = `262,144 - 240 = 261,904` for 18 big months
+- Big cap = `⌊261,904 / 18⌋ = 14,550`
+
+So the 6 small months keep all 40 observations; the 18 big months each get
+14,550 observations. Under the old uniform algorithm they would have been
+capped at 10,922 — the adaptive version gives them **~33% more samples**
+with the same memory ceiling.
+
+The output records exactly what happened. Every per-month row carries
+`n_obs` (original) and `n_obs_used` (post-subsample), and every
+per-concept summary row records `subsampled_any`, `pct_obs_used`,
+`total_obs_original`, `total_obs_used`, `total_obs_excluded`,
+`memory_budget_mb`, and `subsample_cap_per_month`. When nothing was
+subsampled, `pct_obs_used == 100` and `subsampled_any == FALSE`.
+
+## Effect on the statistics
+
+- **PSI, JSD** — unchanged in expectation. Both are computed on the
+  10-quantile histogram; bin proportions converge very quickly with
+  sample size. Empirically, 10× subsampling shifts PSI by < 0.1.
+- **Wasserstein-1** — converges as `O(1/√N)`; expected precision at
+  the default cap for a 20-year monthly series is < 5% error.
+- **bcp regime detection, Mann-Kendall, ACF** — operate on the monthly
+  mean/SD series, not raw values. Unaffected.
+- **Hartigan dip test** — mildly less sensitive at small caps, but
+  100K samples is well past the point where the dip test converges.
+
+## When to override the default
+
+- Institution provides fixed high memory allocations (64 GB+, few
+  concurrent DQD runs): set `driftMemoryBudgetMB = Inf` to disable
+  subsampling and get exact Wasserstein.
+- Memory-constrained shared environment: set an explicit value (e.g.,
+  `driftMemoryBudgetMB = 500`) so drift is guaranteed to fit even if
+  auto-detection over-reports available memory (some cgroup-limited
+  containers report host memory).
+- Manually tune the safety factor: not exposed as a top-level
+  parameter — the default `5` accounts for observed peak usage. If a
+  concept still crashes, the first move is lowering
+  `driftMemoryBudgetMB`, not raising the safety factor.
 
 # Methods
 
@@ -240,7 +325,8 @@ per-month drill-down.
 | `measurement_concept_id` | Concept identifier |
 | `unit_concept_id` | Unit concept (or `NA` for unit-less values) |
 | `year_month` | Calendar month, `YYYY-MM` |
-| `n_obs` | Non-NA value count for the month |
+| `n_obs` | Non-NA value count for the month (original, pre-subsample) |
+| `n_obs_used` | Value count actually fed into the drift computation. Equals `n_obs` unless the month was subsampled to fit the memory budget |
 | `psi_origin` | PSI vs. origin baseline |
 | `wasserstein_origin` | Wasserstein-1 vs. origin baseline, in value units |
 | `jsd_origin` | Jensen-Shannon divergence (log2, in [0, 1]) vs. origin |
@@ -278,6 +364,12 @@ One row per (concept, unit). Dashboard sorting / triage artifact.
 | `priority_score` | `max(psi_origin, psi_current) * log10(1 + total_n_obs)` — sortable score combining drift magnitude and data volume. High priority = drifting concept with high traffic |
 | `pattern_type` | Rule-based primary drift pattern label — see the Pattern Classification section |
 | `pattern_tags` | Semicolon-separated list of all rules that matched. Useful when a concept has multiple simultaneous patterns |
+| `total_obs_original`, `total_obs_used`, `total_obs_excluded` | Observation counts. `total_obs_used` equals `total_obs_original` unless memory-adaptive subsampling reduced the workload |
+| `pct_obs_used` | Percent of observations that fed the drift computation. `100` when no subsampling happened |
+| `subsampled_any` | TRUE if any month was subsampled |
+| `memory_budget_mb` | Per-worker memory budget (MB) used for this concept's drift run. `NA` when subsampling was disabled |
+| `n_months_subsampled` | Count of months that were actually trimmed. Months whose original count already fit are not counted here |
+| `subsample_cap_big_months` | The observation cap that trimmed months were capped to. Small months (those already below the adaptively-computed fair share) are never trimmed, so they don't factor into this figure. `NA` when no month required capping |
 
 ## `<baseFilePath>_drift_histogram.csv`
 

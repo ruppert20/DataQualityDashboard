@@ -16,7 +16,8 @@ the numerical result.}
   cdmVersion,
   resume,
   computeDrift,
-  minRegimeMonths
+  minRegimeMonths,
+  driftMemoryBudgetBytes
 )
 }
 \arguments{
@@ -41,6 +42,8 @@ the numerical result.}
 \item{computeDrift}{Whether to run the temporal drift extension on numeric checks. Default TRUE.}
 
 \item{minRegimeMonths}{Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and their months flagged as anomalies. Default 3.}
+
+\item{driftMemoryBudgetBytes}{Per-worker memory budget (in bytes) used to decide when to subsample large months.}
 }
 \value{
 A dataframe containing the check results

@@ -74,40 +74,65 @@
   .writeDriftCsvs(emptyOutputs, baseFilePath)
 
   if (is.null(qData) || nrow(qData) == 0) {
+    ParallelLogger::logInfo(
+      "[drift] .computeDrift entry: qData empty, nothing to do")
     return(invisible(emptyOutputs))
   }
 
+  t_entry <- Sys.time()
+  ParallelLogger::logInfo(sprintf(
+    "[drift] .computeDrift entry: qData has %d rows, %d columns",
+    nrow(qData), ncol(qData)))
+
   # is.finite() rejects NA, NaN, and Inf in one go — Inf would corrupt
   # mean/sd/Wasserstein without triggering the NA filter.
+  t_filter <- Sys.time()
   df <- qData %>%
     dplyr::filter(is.finite(.data$value_as_number),
                   !is.na(.data$measurement_datetime)) %>%
     dplyr::mutate(year_month = .toYearMonth(.data$measurement_datetime))
+  ParallelLogger::logInfo(sprintf(
+    "[drift] filter+year_month done in %.1fs: %d rows survived (%.1f%%)",
+    as.numeric(difftime(Sys.time(), t_filter, units = "secs")),
+    nrow(df), 100 * nrow(df) / nrow(qData)))
 
   if (nrow(df) == 0) {
+    ParallelLogger::logInfo(
+      "[drift] no rows survived filter (all NA / non-finite); returning empty")
     return(invisible(emptyOutputs))
   }
 
-  groups <- df %>%
-    dplyr::distinct(.data$measurement_concept_id, .data$unit_concept_id) %>%
-    as.data.frame()
+  # Split-once by (concept, unit) instead of filtering df on each iteration.
+  # Filtering was O(n_rows) per iteration = O(n_groups * n_rows) overall —
+  # painfully slow when qData is large and there are many concept-unit pairs.
+  # split() returns a list of integer row indices keyed by group; subsetting
+  # df once per key is O(group_size), so the loop is O(n_rows) total.
+  t_split <- Sys.time()
+  # Use ASCII unit separator so we can reliably split the key back apart.
+  key <- paste(df$measurement_concept_id,
+               df$unit_concept_id,
+               sep = "\x1f")
+  rows_by_group <- split(seq_len(nrow(df)), key)
+  n_groups <- length(rows_by_group)
+  ParallelLogger::logInfo(sprintf(
+    "[drift] split into %d (concept, unit) groups in %.1fs",
+    n_groups, as.numeric(difftime(Sys.time(), t_split, units = "secs"))))
 
-  monthly_all <- vector("list", nrow(groups))
-  summary_all <- vector("list", nrow(groups))
-  histogram_all <- vector("list", nrow(groups))
+  monthly_all <- vector("list", n_groups)
+  summary_all <- vector("list", n_groups)
+  histogram_all <- vector("list", n_groups)
 
-  for (i in seq_len(nrow(groups))) {
-    cid <- groups$measurement_concept_id[i]
-    uid <- groups$unit_concept_id[i]
+  group_keys <- names(rows_by_group)
+  for (i in seq_len(n_groups)) {
+    parts <- strsplit(group_keys[i], "\x1f", fixed = TRUE)[[1]]
+    cid <- parts[1]
+    uid <- if (length(parts) >= 2 && parts[2] != "NA") parts[2] else NA
+    grp <- df[rows_by_group[[i]], , drop = FALSE]
 
-    if (is.na(uid)) {
-      grp <- df %>%
-        dplyr::filter(.data$measurement_concept_id == cid,
-                      is.na(.data$unit_concept_id))
-    } else {
-      grp <- df %>%
-        dplyr::filter(.data$measurement_concept_id == cid,
-                      .data$unit_concept_id == uid)
+    if (i == 1 || i %% 10 == 0 || i == n_groups) {
+      ParallelLogger::logInfo(sprintf(
+        "[drift] group %d/%d (concept=%s unit=%s, %d rows)",
+        i, n_groups, as.character(cid), as.character(uid), nrow(grp)))
     }
 
     res <- tryCatch(
@@ -137,6 +162,10 @@
   )
 
   .writeDriftCsvs(outputs, baseFilePath)
+  ParallelLogger::logInfo(sprintf(
+    "[drift] .computeDrift exit: %d groups processed in %.1fs total",
+    n_groups,
+    as.numeric(difftime(Sys.time(), t_entry, units = "secs"))))
   invisible(outputs)
 }
 

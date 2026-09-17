@@ -150,6 +150,15 @@
 
   if (nrow(grp) == 0) return(NULL)
 
+  # Consistent prefix so operators can `grep '\[drift/CID]'` in a large log
+  # file to trace one concept, or `grep '\[drift]'` for all drift activity.
+  tag <- sprintf("[drift/%s/%s]", as.character(cid), as.character(uid))
+  gc_reset <- gc(verbose = FALSE, reset = TRUE)
+  t0 <- Sys.time()
+  ParallelLogger::logInfo(sprintf(
+    "%s entry: %d rows across candidate months (concept size before grouping)",
+    tag, nrow(grp)))
+
   # ---- Memory-adaptive per-month subsampling ---------------------------------
   # Adaptive redistribution algorithm: rather than assign every month the
   # same cap (budget/n_months) and waste allocation on small months that
@@ -191,6 +200,9 @@
     grp <- grp[sort(kept_rows), , drop = FALSE]
   }
 
+  ParallelLogger::logInfo(sprintf(
+    "%s building monthly_raw list-column (%d rows, %d months)",
+    tag, nrow(grp), n_months))
   monthly_raw <- grp %>%
     dplyr::group_by(.data$year_month) %>%
     dplyr::summarise(
@@ -205,23 +217,46 @@
       n_obs = as.integer(n_obs_original_by_month[.data$year_month])
     )
 
-  if (nrow(monthly_raw) < 2) return(NULL)
+  if (nrow(monthly_raw) < 2) {
+    ParallelLogger::logInfo(sprintf(
+      "%s abort: only %d monthly rows after grouping (need >= 2)",
+      tag, nrow(monthly_raw)))
+    return(NULL)
+  }
 
   # Eligibility is based on ORIGINAL n_obs — subsampling never demotes a month
   # into insufficient-data territory because the cap is floored at minMonthObs.
   eligible <- monthly_raw %>% dplyr::filter(.data$n_obs >= minMonthObs)
-  if (nrow(eligible) == 0) return(NULL)
+  if (nrow(eligible) == 0) {
+    ParallelLogger::logInfo(sprintf(
+      "%s abort: no month has >= %d observations (all insufficient)",
+      tag, minMonthObs))
+    return(NULL)
+  }
 
   origin_months <- utils::head(eligible$year_month, originWindowMonths)
   origin_values <- unlist(
     monthly_raw$values[monthly_raw$year_month %in% origin_months],
     use.names = FALSE
   )
-  if (length(origin_values) < minMonthObs) return(NULL)
+  if (length(origin_values) < minMonthObs) {
+    ParallelLogger::logInfo(sprintf(
+      "%s abort: origin baseline pool has only %d values (need >= %d)",
+      tag, length(origin_values), minMonthObs))
+    return(NULL)
+  }
 
   bin_breaks <- .quantileBinBreaks(origin_values, nBins)
-  if (is.null(bin_breaks)) return(NULL)
+  if (is.null(bin_breaks)) {
+    ParallelLogger::logInfo(sprintf(
+      "%s abort: could not construct quantile bins from origin baseline",
+      tag))
+    return(NULL)
+  }
   n_bins_actual <- length(bin_breaks) - 1L
+  ParallelLogger::logInfo(sprintf(
+    "%s origin baseline: %d months, %d values, %d bins",
+    tag, length(origin_months), length(origin_values), n_bins_actual))
 
   origin_hist <- .valuesToHistProps(origin_values, bin_breaks)
 
@@ -243,6 +278,13 @@
 
   hist_rows <- vector("list", nrow(monthly))
 
+  n_eligible <- sum(!monthly$insufficient_data)
+  ParallelLogger::logInfo(sprintf(
+    "%s origin-comparison phase: %d eligible months x [PSI, JSD, Wasserstein]",
+    tag, n_eligible))
+  origin_pool_size <- length(origin_values)
+  phase_start <- Sys.time()
+
   for (m in seq_len(nrow(monthly))) {
     if (monthly$insufficient_data[m]) next
 
@@ -254,8 +296,11 @@
     m_counts <- .valuesToHistCounts(mvals, bin_breaks)
 
     monthly$psi_origin[m] <- .psi(m_props, origin_hist)
-    monthly$jsd_origin[m] <- .jsdSafe(m_props, origin_hist)
-    monthly$wasserstein_origin[m] <- .wassersteinSafe(mvals, origin_values)
+    monthly$jsd_origin[m] <- .jsdSafe(m_props, origin_hist,
+                                       ctx = tag, month = monthly$year_month[m])
+    monthly$wasserstein_origin[m] <- .wassersteinSafe(
+      mvals, origin_values,
+      ctx = tag, month = monthly$year_month[m])
 
     hist_rows[[m]] <- data.frame(
       measurement_concept_id = cid,
@@ -269,6 +314,9 @@
       stringsAsFactors = FALSE
     )
   }
+  ParallelLogger::logInfo(sprintf(
+    "%s origin-comparison phase complete (%.1fs)",
+    tag, as.numeric(difftime(Sys.time(), phase_start, units = "secs"))))
 
   eligible_idx <- which(!monthly$insufficient_data)
   if (length(eligible_idx) >= 2) {
@@ -277,6 +325,10 @@
       sd = ifelse(is.na(monthly$m_sd[eligible_idx]), 0,
                   monthly$m_sd[eligible_idx])
     )
+    ParallelLogger::logInfo(sprintf(
+      "%s bcp: fitting bivariate change-point model on %d months",
+      tag, nrow(bcp_input)))
+    bcp_start <- Sys.time()
     bcp_post <- tryCatch({
       # suppressWarnings: bcp emits a benign "built under R x.y.z" message on
       # first lazy-load; DQD's outer warning handler would otherwise abort.
@@ -284,10 +336,16 @@
       as.numeric(bcp_res$posterior.prob)
     }, error = function(e) {
       ParallelLogger::logWarn(sprintf(
-        "bcp failed for concept=%s unit=%s: %s",
-        as.character(cid), as.character(uid), conditionMessage(e)))
+        "%s bcp FAILED (input %dx%d, mean range [%.4g,%.4g]): %s",
+        tag, nrow(bcp_input), ncol(bcp_input),
+        min(bcp_input[, "mean"]), max(bcp_input[, "mean"]),
+        conditionMessage(e)))
       rep(NA_real_, length(eligible_idx))
     })
+    ParallelLogger::logInfo(sprintf(
+      "%s bcp complete (%.1fs, %d posteriors > 0.5)",
+      tag, as.numeric(difftime(Sys.time(), bcp_start, units = "secs")),
+      sum(bcp_post > bcpThreshold, na.rm = TRUE)))
     monthly$bcp_posterior[eligible_idx] <- bcp_post
   }
 
@@ -321,7 +379,12 @@
     monthly$regime_id[eligible_idx] <- cumsum(is_start)
   }
 
-  for (rid in unique(stats::na.omit(monthly$regime_id))) {
+  regime_ids <- unique(stats::na.omit(monthly$regime_id))
+  ParallelLogger::logInfo(sprintf(
+    "%s current-regime phase: pooling values across %d regime(s)",
+    tag, length(regime_ids)))
+  regime_start <- Sys.time()
+  for (rid in regime_ids) {
     regime_rows <- which(monthly$regime_id == rid & !is.na(monthly$regime_id))
     regime_values <- unlist(monthly$values[regime_rows], use.names = FALSE)
     regime_values <- regime_values[!is.na(regime_values)]
@@ -334,10 +397,17 @@
       if (length(mvals) == 0) next
       m_props <- .valuesToHistProps(mvals, bin_breaks)
       monthly$psi_current[m] <- .psi(m_props, regime_hist)
-      monthly$jsd_current[m] <- .jsdSafe(m_props, regime_hist)
-      monthly$wasserstein_current[m] <- .wassersteinSafe(mvals, regime_values)
+      monthly$jsd_current[m] <- .jsdSafe(m_props, regime_hist,
+                                         ctx = tag,
+                                         month = monthly$year_month[m])
+      monthly$wasserstein_current[m] <- .wassersteinSafe(
+        mvals, regime_values,
+        ctx = tag, month = monthly$year_month[m])
     }
   }
+  ParallelLogger::logInfo(sprintf(
+    "%s current-regime phase complete (%.1fs)",
+    tag, as.numeric(difftime(Sys.time(), regime_start, units = "secs"))))
 
   monthly$is_anomaly <- !is.na(monthly$psi_current) &
     monthly$psi_current > driftPsiThreshold &
@@ -437,6 +507,9 @@
     max(regime_start_lengths, na.rm = TRUE) else NA_integer_
 
   # Trend tests: Mann-Kendall on monthly mean AND on monthly psi_origin.
+  ParallelLogger::logInfo(sprintf(
+    "%s trend + seasonality + dip diagnostics", tag))
+  diag_start <- Sys.time()
   eligible_monthly <- monthly_out %>%
     dplyr::filter(!.data$insufficient_data) %>%
     dplyr::arrange(.data$year_month)
@@ -454,8 +527,12 @@
     v <- unlist(monthly$values[rr], use.names = FALSE)
     v[!is.na(v)]
   } else numeric(0)
-  dip_orig <- .dipTest(origin_values)
-  dip_curr <- .dipTest(current_regime_values)
+  dip_orig <- .dipTest(origin_values, ctx = tag, which = "origin")
+  dip_curr <- .dipTest(current_regime_values,
+                        ctx = tag, which = "current-regime")
+  ParallelLogger::logInfo(sprintf(
+    "%s diagnostics complete (%.1fs)",
+    tag, as.numeric(difftime(Sys.time(), diag_start, units = "secs"))))
 
   # Priority: sortable "how much drift × how much data" score.
   psi_max <- suppressWarnings(max(c(summary_out$max_psi_origin,
@@ -528,6 +605,19 @@
   summary_out$subsample_cap_big_months <- if (any(big_diff, na.rm = TRUE))
     as.integer(max(monthly_out$n_obs_used[big_diff])) else NA_integer_
 
+  # gc() returns a 2-row matrix (Ncells / Vcells) with 7 numeric columns:
+  #   [,2] = used MB,  [,7] = max-used MB since last reset.
+  # Sum across the two rows to get total R heap usage.
+  gc_final <- gc(verbose = FALSE)
+  elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+  ParallelLogger::logInfo(sprintf(
+    paste("%s complete: %.1fs, %d regimes, %d anomalies, R memory now",
+          "%.0f MB (peak this concept %.0f MB), subsampled=%s (%.1f%% of obs used)"),
+    tag, elapsed,
+    summary_out$n_regimes, summary_out$n_anomalous_months,
+    sum(gc_final[, 2]), sum(gc_final[, 7]),
+    summary_out$subsampled_any, summary_out$pct_obs_used))
+
   list(
     monthly = monthly_out,
     summary = summary_out,
@@ -567,21 +657,43 @@
 }
 
 
-.jsdSafe <- function(p, q) {
+# All three wrappers take optional ctx/month/which context so that on a native
+# crash or R error we log WHICH concept + WHICH month + WHICH call point died,
+# with the input sizes. Without this a segfault in transport::wasserstein1d
+# gives R "session terminated" and nothing else — no way to know which specific
+# comparison killed things.
+.jsdSafe <- function(p, q, ctx = NULL, month = NULL) {
   tryCatch({
     val <- suppressMessages(
       philentropy::JSD(rbind(p, q), unit = "log2", est.prob = NULL, test.na = FALSE)
     )
     as.numeric(val)
-  }, error = function(e) NA_real_)
+  }, error = function(e) {
+    if (!is.null(ctx)) {
+      ParallelLogger::logWarn(sprintf(
+        "%s JSD failed at %s (p len=%d, q len=%d): %s",
+        ctx, month %||% "?", length(p), length(q), conditionMessage(e)))
+    }
+    NA_real_
+  })
 }
 
 
-.wassersteinSafe <- function(a, b) {
+.wassersteinSafe <- function(a, b, ctx = NULL, month = NULL) {
   tryCatch({
     as.numeric(transport::wasserstein1d(a, b, p = 1))
-  }, error = function(e) NA_real_)
+  }, error = function(e) {
+    if (!is.null(ctx)) {
+      ParallelLogger::logWarn(sprintf(
+        "%s Wasserstein failed at %s (a len=%d, b len=%d): %s",
+        ctx, month %||% "?", length(a), length(b), conditionMessage(e)))
+    }
+    NA_real_
+  })
 }
+
+
+`%||%` <- function(a, b) if (is.null(a) || (length(a) == 1 && is.na(a))) b else a
 
 
 # Timezone-safe YYYY-MM extraction: preserves whichever TZ the source column
@@ -841,7 +953,7 @@
 }
 
 
-.dipTest <- function(x) {
+.dipTest <- function(x, ctx = NULL, which = NULL) {
   x <- x[!is.na(x)]
   if (length(x) < 20) {
     return(list(dip = NA_real_, p_value = NA_real_, is_bimodal_at_05 = NA))
@@ -853,9 +965,14 @@
     list(dip = as.numeric(r$statistic),
          p_value = as.numeric(r$p.value),
          is_bimodal_at_05 = r$p.value < 0.05)
-  }, error = function(e) list(dip = NA_real_,
-                              p_value = NA_real_,
-                              is_bimodal_at_05 = NA))
+  }, error = function(e) {
+    if (!is.null(ctx)) {
+      ParallelLogger::logWarn(sprintf(
+        "%s dip test failed for %s baseline (n=%d): %s",
+        ctx, which %||% "?", length(x), conditionMessage(e)))
+    }
+    list(dip = NA_real_, p_value = NA_real_, is_bimodal_at_05 = NA)
+  })
 }
 
 

@@ -77,6 +77,17 @@ per-month drift scores are flagged as anomalies when they exceed threshold.
   omitted (may hold credentials); only its `$dbms` field is included
   because it drives SQL dialect translation and does not identify a
   specific server.
+- **Stage-by-stage drift logging** prefixed with `[drift/<concept>/<unit>]`
+  so operators can `grep '\[drift'` to trace all drift activity or
+  narrow to a single concept. Every major phase logs entry, elapsed
+  seconds, and either "complete" or the specific abort reason
+  (insufficient months, insufficient baseline, etc.). Each concept ends
+  with a summary line showing R heap usage now vs. peak-during-concept
+  and the subsampling fraction. On error, the C++ wrappers
+  (`transport::wasserstein1d`, `philentropy::JSD`, `diptest::dip.test`)
+  log the specific call context (concept, unit, month, input sizes)
+  before returning NA — so a segfault-adjacent failure identifies
+  exactly which comparison died.
 
 DataQualityDashboard 2.8.3
 ==========================

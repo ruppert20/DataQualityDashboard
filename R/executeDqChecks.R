@@ -167,7 +167,13 @@ executeDqChecks <- function(connectionDetails,
   # Reproducibility banner: log environment + all input parameters (except
   # connectionDetails which may contain credentials). Users re-running months
   # later can pull this out of the DQD log to reconstruct the exact call.
-  .logRunConfig(
+  # Wrapped in tryCatch so any formatting error in the banner cannot silently
+  # abort the whole run — banner failure should be diagnostic, not fatal.
+  # Emit a marker BEFORE .logRunConfig so we can distinguish "banner skipped
+  # because of an installed-version mismatch" (no marker) from "banner ran"
+  # (marker present).
+  ParallelLogger::logInfo("[config] emitting reproducibility banner...")
+  tryCatch(.logRunConfig(
     params = list(
       cdmDatabaseSchema = cdmDatabaseSchema,
       resultsDatabaseSchema = resultsDatabaseSchema,
@@ -204,7 +210,14 @@ executeDqChecks <- function(connectionDetails,
     connectionDetails = connectionDetails,
     driftMemoryBudgetBytes = driftMemoryBudgetBytes,
     availableBytes = .availableMemoryBytes()
-  )
+  ),
+    error = function(e) {
+      # If anything in the banner fails, at least mark that we tried and
+      # surface the error rather than silently skipping the banner entirely.
+      ParallelLogger::logWarn(sprintf(
+        "Run-configuration banner failed: %s (drift banner skipped)",
+        conditionMessage(e)))
+    })
 
   # temporary patch to work around vroom 1.6.4 bug
   readr::local_edition(1)

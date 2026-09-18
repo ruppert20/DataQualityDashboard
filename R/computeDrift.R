@@ -634,17 +634,23 @@
   summary_out$subsample_cap_big_months <- if (any(big_diff, na.rm = TRUE))
     as.integer(max(monthly_out$n_obs_used[big_diff])) else NA_integer_
 
-  # gc() returns a 2-row matrix (Ncells / Vcells) with 7 numeric columns:
-  #   [,2] = used MB,  [,7] = max-used MB since last reset.
-  # Sum across the two rows to get total R heap usage.
+  # gc() returns a 2-row matrix (Ncells / Vcells). Column layout differs by
+  # R version and platform:
+  #   R >= 4.4 Windows: 7 cols (includes "limit (Mb)" between trigger and max)
+  #   R >= 4.4 non-Windows: 6 cols (no limit column)
+  #   Older R: 6 cols
+  # "used (Mb)" is always column 2. "max used (Mb)" is always the LAST column
+  # regardless of layout, so index by ncol() to stay portable.
   gc_final <- gc(verbose = FALSE)
+  mem_now_mb <- sum(gc_final[, 2])
+  mem_peak_mb <- sum(gc_final[, ncol(gc_final)])
   elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
   ParallelLogger::logInfo(sprintf(
     paste("%s complete: %.1fs, %d regimes, %d anomalies, R memory now",
           "%.0f MB (peak this concept %.0f MB), subsampled=%s (%.1f%% of obs used)"),
     tag, elapsed,
     summary_out$n_regimes, summary_out$n_anomalous_months,
-    sum(gc_final[, 2]), sum(gc_final[, 7]),
+    mem_now_mb, mem_peak_mb,
     summary_out$subsampled_any, summary_out$pct_obs_used))
 
   list(

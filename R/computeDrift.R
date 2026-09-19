@@ -153,6 +153,14 @@
       summary_all[[i]] <- res$summary
       histogram_all[[i]] <- res$histogram
     }
+    # Between-concept cleanup: R's GC is lazy and `grp` (the just-processed
+    # concept's rows) plus all the transient list-columns can retain many GB
+    # for a huge concept. Explicit cleanup here so the next concept starts
+    # from a cleaner heap. Observed the residual carrying forward as ~4.6 GB
+    # from a 12.5 GB peak concept — that's a real problem for a subsequent
+    # concept that also happens to be large.
+    rm(grp, res)
+    invisible(gc(verbose = FALSE, full = TRUE))
   }
 
   outputs <- list(
@@ -348,7 +356,12 @@
     tag, as.numeric(difftime(Sys.time(), phase_start, units = "secs"))))
 
   eligible_idx <- which(!monthly$insufficient_data)
-  if (length(eligible_idx) >= 2) {
+  # bcp needs a meaningful series length to produce useful posteriors. On very
+  # short series (< 6 eligible months) bcp can hang, segfault, or return
+  # degenerate posteriors — none of which help interpretation. Skip gracefully
+  # and treat the whole span as a single regime.
+  min_bcp_months <- 6L
+  if (length(eligible_idx) >= min_bcp_months) {
     bcp_input <- cbind(
       mean = monthly$m_mean[eligible_idx],
       sd = ifelse(is.na(monthly$m_sd[eligible_idx]), 0,
@@ -376,6 +389,15 @@
       tag, as.numeric(difftime(Sys.time(), bcp_start, units = "secs")),
       sum(bcp_post > bcpThreshold, na.rm = TRUE)))
     monthly$bcp_posterior[eligible_idx] <- bcp_post
+  } else if (length(eligible_idx) > 0) {
+    # Series too short for bcp — skip and let the downstream regime-assignment
+    # code produce a single regime (first-month is_regime_start = TRUE, all
+    # posteriors NA). This still yields origin-vs-current metrics against the
+    # single pooled regime baseline, and prevents bcp from segfaulting on
+    # pathological short series.
+    ParallelLogger::logInfo(sprintf(
+      "%s bcp: skipped (only %d eligible months, need >= %d) — treating whole series as one regime",
+      tag, length(eligible_idx), min_bcp_months))
   }
 
   # Regime assignment operates only on eligible months.

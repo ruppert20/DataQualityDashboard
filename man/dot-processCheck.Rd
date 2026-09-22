@@ -17,7 +17,8 @@ the numerical result.}
   resume,
   computeDrift,
   minRegimeMonths,
-  driftMemoryBudgetBytes
+  driftMemoryBudgetBytes,
+  driftLogLevel
 )
 }
 \arguments{
@@ -44,6 +45,8 @@ the numerical result.}
 \item{minRegimeMonths}{Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and their months flagged as anomalies. Default 3.}
 
 \item{driftMemoryBudgetBytes}{Per-worker memory budget (in bytes) used to decide when to subsample large months.}
+
+\item{driftLogLevel}{Verbosity of drift-computation log output: "quiet" (concept summary + errors only), "normal" (default; all phase logs), or "verbose".}
 }
 \value{
 A dataframe containing the check results

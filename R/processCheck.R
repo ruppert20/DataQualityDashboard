@@ -80,6 +80,7 @@ calculate_mode <- function(x) {
 #' @param computeDrift              Whether to run the temporal drift extension on numeric checks. Default TRUE.
 #' @param minRegimeMonths           Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and their months flagged as anomalies. Default 3.
 #' @param driftMemoryBudgetBytes    Per-worker memory budget (in bytes) used to decide when to subsample large months.
+#' @param driftLogLevel             Verbosity of drift-computation log output: "quiet" (concept summary + errors only), "normal" (default; all phase logs), or "verbose".
 #'
 #' @return A dataframe containing the check results
 #'
@@ -95,7 +96,8 @@ calculate_mode <- function(x) {
                           resume,
                           computeDrift,
                           minRegimeMonths,
-                          driftMemoryBudgetBytes) {
+                          driftMemoryBudgetBytes,
+                          driftLogLevel) {
   singleThreaded <- TRUE
   start <- Sys.time()
   if (is.null(connection)) {
@@ -289,7 +291,8 @@ calculate_mode <- function(x) {
                 withCallingHandlers(
                   .computeDrift(qData = qData, baseFilePath = baseFilePath,
                                 minRegimeMonths = minRegimeMonths,
-                                memoryBudgetBytes = driftMemoryBudgetBytes),
+                                memoryBudgetBytes = driftMemoryBudgetBytes,
+                                driftLogLevel = driftLogLevel),
                   warning = function(w) {
                     ParallelLogger::logInfo(sprintf(
                       "Drift (non-fatal) warning for %s: %s", check_name, w$message))

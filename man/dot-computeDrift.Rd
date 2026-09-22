@@ -14,7 +14,8 @@
   driftPsiThreshold = 0.25,
   minRegimeMonths,
   memoryBudgetBytes = Inf,
-  safetyFactor = 5
+  safetyFactor = 5,
+  driftLogLevel = "normal"
 )
 }
 \arguments{

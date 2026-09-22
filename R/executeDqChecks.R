@@ -55,6 +55,7 @@
 #' @param minRegimeMonths           Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and the affected months are flagged as anomalies instead. Default is 3.
 #' @param resume                    Boolean controlling whether numeric-check Andromeda cache files are reused when present. TRUE (default) reuses cached raw pulls to save warehouse time on re-runs. Set FALSE to force fresh SQL execution.
 #' @param driftMemoryBudgetMB       Memory budget (in MB) for the drift computation, used to decide when to subsample months for concepts too large to fit in RAM. Accepts `"auto"` (default, detects free system memory and reserves 25% divided by `numThreads`), a numeric MB value (divided by `numThreads` for per-worker share), or `Inf` to disable subsampling. When subsampling occurs, per-concept summary rows record `subsampled_any`, `pct_obs_used`, `subsample_cap_per_month`, and per-month rows record both `n_obs` (original) and `n_obs_used`.
+#' @param driftLogLevel             Verbosity of drift-computation log output. `"quiet"` emits only the per-concept summary line + abort reasons + errors (roughly 1 line per concept, plus 2 for the whole run). `"normal"` (default) also emits phase-level progress inside each concept (~10 lines per concept, matches pre-2.9.1 behavior). `"verbose"` reserved for future per-call diagnostics.
 #'
 #' @return A list object of results
 #'
@@ -100,7 +101,17 @@ executeDqChecks <- function(connectionDetails,
                             computeDrift = TRUE,
                             minRegimeMonths = 3,
                             resume = TRUE,
-                            driftMemoryBudgetMB = "auto") {
+                            driftMemoryBudgetMB = "auto",
+                            driftLogLevel = "normal") {
+  # Suppress readr's cli-formatted "Column specification" ANSI garbage from
+  # the DQD log. readr::read_csv emits it via {cli} on every CSV read, and
+  # ParallelLogger captures the raw ANSI escape sequences without stripping.
+  # The user-visible effect: log lines like "[36mCol[39m..." — meaningless
+  # noise. Restore prior value on exit so we don't affect the caller's session.
+  prev_show_col_types <- getOption("readr.show_col_types")
+  options(readr.show_col_types = FALSE)
+  on.exit(options(readr.show_col_types = prev_show_col_types), add = TRUE)
+
   # Check input -------------------------------------------------------------------------------------------------------------------
   if (!any(class(connectionDetails) %in% c("connectionDetails", "ConnectionDetails"))) {
     stop("connectionDetails must be an object of class 'connectionDetails' or 'ConnectionDetails'.")
@@ -125,6 +136,10 @@ executeDqChecks <- function(connectionDetails,
       (identical(driftMemoryBudgetMB, "auto") ||
        (is.numeric(driftMemoryBudgetMB) &&
         (is.infinite(driftMemoryBudgetMB) || driftMemoryBudgetMB > 0)))
+  )
+  stopifnot(
+    is.character(driftLogLevel), length(driftLogLevel) == 1,
+    driftLogLevel %in% c("quiet", "normal", "verbose")
   )
 
   # Resolve "auto" / numeric MB / Inf into a per-worker byte budget. When
@@ -205,7 +220,8 @@ executeDqChecks <- function(connectionDetails,
       computeDrift = computeDrift,
       minRegimeMonths = minRegimeMonths,
       resume = resume,
-      driftMemoryBudgetMB = driftMemoryBudgetMB
+      driftMemoryBudgetMB = driftMemoryBudgetMB,
+      driftLogLevel = driftLogLevel
     ),
     connectionDetails = connectionDetails,
     driftMemoryBudgetBytes = driftMemoryBudgetBytes,
@@ -428,6 +444,7 @@ executeDqChecks <- function(connectionDetails,
     minRegimeMonths,
     resume,
     driftMemoryBudgetBytes,
+    driftLogLevel,
     progressBar = TRUE
   )
   ParallelLogger::stopCluster(cluster = cluster)

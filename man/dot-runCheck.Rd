@@ -28,7 +28,8 @@
   computeDrift,
   minRegimeMonths,
   resume,
-  driftMemoryBudgetBytes
+  driftMemoryBudgetBytes,
+  driftLogLevel
 )
 }
 \arguments{
@@ -79,6 +80,8 @@
 \item{resume}{Whether to resume from existing Andromeda cache files. Default TRUE.}
 
 \item{driftMemoryBudgetBytes}{Per-worker memory budget (bytes) for drift subsampling.}
+
+\item{driftLogLevel}{Verbosity of drift-computation log output ("quiet", "normal", or "verbose").}
 }
 \value{
 A dataframe containing the check results or SQL queries (NULL if sqlOnlyIncrementalInsert is TRUE)

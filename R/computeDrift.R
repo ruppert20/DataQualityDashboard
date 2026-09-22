@@ -22,6 +22,12 @@
 #'     is robust to non-Gaussian distributions; medians are robust to single-
 #'     month outlier spikes. Together this prevents the bcp pathology where a
 #'     spike month contaminates its own regime baseline.
+#'   * Origin baseline is the FIRST regime (R1) identified by the change-point
+#'     detector, not a fixed-length window. This guarantees the reference
+#'     distribution is single-regime by construction and eliminates the
+#'     v0/v1-early pathology in which a fixed 12-month window could straddle
+#'     a regime boundary (making the "baseline" itself a mixture of two
+#'     distinct states).
 #'   * Individual-month outlier flag: Hampel filter (rolling median + rolling
 #'     MAD) applied to monthly means. Reports extreme single-month spikes
 #'     explicitly via `is_extreme_month`, which is what the distributional
@@ -44,8 +50,6 @@
 #' @param baseFilePath      file path prefix (same convention as numeric_stats).
 #' @param minMonthObs       minimum non-NA observations for a month to be
 #'                          included in drift computation (default 30).
-#' @param originWindowMonths months used to build the fixed origin baseline
-#'                          (default 12).
 #' @param nBins             number of quantile bins for PSI/JSD (default 10).
 #' @param changepointPenalty penalty rule passed to `changepoint.np::cpt.np`.
 #'                          Default "MBIC" (Modified BIC, conservative --
@@ -89,7 +93,6 @@
 .computeDrift <- function(qData,
                           baseFilePath,
                           minMonthObs = 30,
-                          originWindowMonths = 12,
                           nBins = 10,
                           changepointPenalty = "MBIC",
                           driftPsiThreshold = 0.25,
@@ -179,7 +182,7 @@
 
     res <- tryCatch(
       .driftForGroup(grp, cid, uid,
-                     minMonthObs, originWindowMonths, nBins,
+                     minMonthObs, nBins,
                      changepointPenalty, driftPsiThreshold,
                      wassersteinAnomalyMultiplier,
                      hampelWindowMonths, hampelThreshold,
@@ -225,7 +228,7 @@
 
 
 .driftForGroup <- function(grp, cid, uid,
-                           minMonthObs, originWindowMonths, nBins,
+                           minMonthObs, nBins,
                            changepointPenalty, driftPsiThreshold,
                            wassersteinAnomalyMultiplier,
                            hampelWindowMonths, hampelThreshold,
@@ -319,49 +322,8 @@
 
   # Eligibility is based on ORIGINAL n_obs — subsampling never demotes a month
   # into insufficient-data territory because the cap is floored at minMonthObs.
-  eligible <- monthly_raw %>% dplyr::filter(.data$n_obs >= minMonthObs)
-  if (nrow(eligible) == 0) {
-    loga(sprintf(
-      "%s abort: no month has >= %d observations (all insufficient)",
-      tag, minMonthObs))
-    return(NULL)
-  }
-
-  origin_months <- utils::head(eligible$year_month, originWindowMonths)
-  origin_values <- unlist(
-    monthly_raw$values[monthly_raw$year_month %in% origin_months],
-    use.names = FALSE
-  )
-  if (length(origin_values) < minMonthObs) {
-    loga(sprintf(
-      "%s abort: origin baseline pool has only %d values (need >= %d)",
-      tag, length(origin_values), minMonthObs))
-    return(NULL)
-  }
-
-  bin_breaks <- .quantileBinBreaks(origin_values, nBins)
-  if (is.null(bin_breaks)) {
-    loga(sprintf(
-      "%s abort: could not construct quantile bins from origin baseline",
-      tag))
-    return(NULL)
-  }
-  n_bins_actual <- length(bin_breaks) - 1L
-  # Pre-sort the origin pool ONCE. All 127+ downstream Wasserstein calls
-  # against origin_values use .wasserstein1PresortedPool, which is
-  # byte-for-byte identical to transport::wasserstein1d(month, origin_values)
-  # but skips the O(n log n) sort transport would redo per call.
-  origin_values_sorted <- sort(origin_values)
-  logn(sprintf(
-    "%s origin baseline: %d months, %d values, %d bins",
-    tag, length(origin_months), length(origin_values), n_bins_actual))
-
-  origin_hist <- .valuesToHistProps(origin_values, bin_breaks)
-
   monthly <- monthly_raw %>%
-    dplyr::mutate(
-      insufficient_data = .data$n_obs < minMonthObs
-    )
+    dplyr::mutate(insufficient_data = .data$n_obs < minMonthObs)
 
   monthly$psi_origin <- NA_real_
   monthly$wasserstein_origin <- NA_real_
@@ -374,49 +336,13 @@
   monthly$is_extreme_month <- FALSE
   monthly$is_anomaly <- FALSE
 
-  hist_rows <- vector("list", nrow(monthly))
-
-  n_eligible <- sum(!monthly$insufficient_data)
-  logn(sprintf(
-    "%s origin-comparison phase: %d eligible months x [PSI, JSD, Wasserstein]",
-    tag, n_eligible))
-  origin_pool_size <- length(origin_values)
-  phase_start <- Sys.time()
-
-  for (m in seq_len(nrow(monthly))) {
-    if (monthly$insufficient_data[m]) next
-
-    mvals <- monthly$values[[m]]
-    mvals <- mvals[!is.na(mvals)]
-    if (length(mvals) == 0) next
-
-    m_props <- .valuesToHistProps(mvals, bin_breaks)
-    m_counts <- .valuesToHistCounts(mvals, bin_breaks)
-
-    monthly$psi_origin[m] <- .psi(m_props, origin_hist)
-    monthly$jsd_origin[m] <- .jsdSafe(m_props, origin_hist,
-                                       ctx = tag, month = monthly$year_month[m])
-    monthly$wasserstein_origin[m] <- .wasserstein1PresortedPool(
-      mvals, origin_values_sorted,
-      ctx = tag, month = monthly$year_month[m])
-
-    hist_rows[[m]] <- data.frame(
-      measurement_concept_id = cid,
-      unit_concept_id = uid,
-      year_month = monthly$year_month[m],
-      bin_index = seq_len(n_bins_actual),
-      bin_lower = bin_breaks[-length(bin_breaks)],
-      bin_upper = bin_breaks[-1],
-      count = m_counts,
-      proportion = m_props,
-      stringsAsFactors = FALSE
-    )
-  }
-  logn(sprintf(
-    "%s origin-comparison phase complete (%.1fs)",
-    tag, as.numeric(difftime(Sys.time(), phase_start, units = "secs"))))
-
   eligible_idx <- which(!monthly$insufficient_data)
+  if (length(eligible_idx) == 0) {
+    loga(sprintf(
+      "%s abort: no month has >= %d observations (all insufficient)",
+      tag, minMonthObs))
+    return(NULL)
+  }
 
   # ---- Individual-month outlier flag (Hampel filter on monthly means) --------
   # Hampel filter (Hampel 1974; Iglewicz & Hoaglin 1993) is the industrial-SPC
@@ -512,6 +438,80 @@
     monthly$is_regime_start[eligible_idx] <- is_start
     monthly$regime_id[eligible_idx] <- cumsum(is_start)
   }
+
+  # ---- Origin baseline: pooled values of R1 ---------------------------------
+  # V1 fix: baseline is the first regime the change-point detector identified,
+  # not a fixed-length window. This guarantees the reference distribution is
+  # single-regime by construction. Previously (v0 and v1-early) a fixed 12-
+  # month window could straddle a regime boundary, making the baseline itself
+  # a mixture of two states -- which then desensitized every downstream PSI/
+  # Wasserstein/JSD-against-origin comparison.
+  r1_idx <- which(monthly$regime_id == 1L & !monthly$insufficient_data)
+  origin_months <- monthly$year_month[r1_idx]
+  origin_values <- unlist(monthly$values[r1_idx], use.names = FALSE)
+  origin_values <- origin_values[!is.na(origin_values)]
+  if (length(origin_values) < minMonthObs) {
+    loga(sprintf(
+      "%s abort: R1 baseline pool has only %d values (need >= %d)",
+      tag, length(origin_values), minMonthObs))
+    return(NULL)
+  }
+
+  bin_breaks <- .quantileBinBreaks(origin_values, nBins)
+  if (is.null(bin_breaks)) {
+    loga(sprintf(
+      "%s abort: could not construct quantile bins from R1 baseline",
+      tag))
+    return(NULL)
+  }
+  n_bins_actual <- length(bin_breaks) - 1L
+  # Pre-sort the origin pool ONCE. All downstream Wasserstein calls against
+  # origin_values use .wasserstein1PresortedPool, which is byte-for-byte
+  # identical to transport::wasserstein1d(month, origin_values) but skips the
+  # O(n log n) sort transport would redo per call.
+  origin_values_sorted <- sort(origin_values)
+  origin_hist <- .valuesToHistProps(origin_values, bin_breaks)
+  logn(sprintf(
+    "%s R1 baseline: %d months, %d values, %d bins",
+    tag, length(origin_months), length(origin_values), n_bins_actual))
+
+  # ---- Origin-comparison loop (PSI / Wasserstein / JSD vs R1) --------------
+  hist_rows <- vector("list", nrow(monthly))
+  phase_start <- Sys.time()
+  logn(sprintf(
+    "%s origin-comparison phase: %d eligible months x [PSI, JSD, Wasserstein]",
+    tag, length(eligible_idx)))
+  for (m in seq_len(nrow(monthly))) {
+    if (monthly$insufficient_data[m]) next
+    mvals <- monthly$values[[m]]
+    mvals <- mvals[!is.na(mvals)]
+    if (length(mvals) == 0) next
+
+    m_props <- .valuesToHistProps(mvals, bin_breaks)
+    m_counts <- .valuesToHistCounts(mvals, bin_breaks)
+
+    monthly$psi_origin[m] <- .psi(m_props, origin_hist)
+    monthly$jsd_origin[m] <- .jsdSafe(m_props, origin_hist,
+                                       ctx = tag, month = monthly$year_month[m])
+    monthly$wasserstein_origin[m] <- .wasserstein1PresortedPool(
+      mvals, origin_values_sorted,
+      ctx = tag, month = monthly$year_month[m])
+
+    hist_rows[[m]] <- data.frame(
+      measurement_concept_id = cid,
+      unit_concept_id = uid,
+      year_month = monthly$year_month[m],
+      bin_index = seq_len(n_bins_actual),
+      bin_lower = bin_breaks[-length(bin_breaks)],
+      bin_upper = bin_breaks[-1],
+      count = m_counts,
+      proportion = m_props,
+      stringsAsFactors = FALSE
+    )
+  }
+  logn(sprintf(
+    "%s origin-comparison phase complete (%.1fs)",
+    tag, as.numeric(difftime(Sys.time(), phase_start, units = "secs"))))
 
   regime_ids <- unique(stats::na.omit(monthly$regime_id))
   logn(sprintf(

@@ -37,7 +37,7 @@
 #' @param sqlOnlyIncrementalInsert  (OPTIONAL) Boolean to determine whether insert check results and associated metadata into output table.  Default is FALSE (for backwards compatability to <= v2.2.0)
 #' @param sqlOnly                   Should the SQLs be executed (FALSE) or just returned (TRUE)?
 #' @param computeDrift              Whether to compute data drift metrics for numeric checks. Default TRUE.
-#' @param minRegimeMonths           Minimum months a bcp segment must span to count as a real regime; shorter segments merge into an adjacent regime and their months are flagged as anomalies. Default 3.
+#' @param minRegimeMonths           Minimum months required for a regime, enforced natively by changepoint.np during segmentation (minseglen). Default 3.
 #' @param resume                    Whether to resume from existing Andromeda cache files. Default TRUE.
 #' @param driftMemoryBudgetBytes    Per-worker memory budget (bytes) for drift subsampling.
 #' @param driftLogLevel             Verbosity of drift-computation log output ("quiet", "normal", or "verbose").

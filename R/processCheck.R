@@ -78,7 +78,7 @@ calculate_mode <- function(x) {
 #' @param cdmVersion                The CDM version (e.g., "5.3", "5.4")
 #' @param resume                    Whether to resume from existing Andromeda files
 #' @param computeDrift              Whether to run the temporal drift extension on numeric checks. Default TRUE.
-#' @param minRegimeMonths           Minimum months a bcp-detected segment must span to count as a real regime. Shorter segments are merged into an adjacent regime and their months flagged as anomalies. Default 3.
+#' @param minRegimeMonths           Minimum months required for a regime, enforced natively by changepoint.np during segmentation (minseglen). Default 3.
 #' @param driftMemoryBudgetBytes    Per-worker memory budget (in bytes) used to decide when to subsample large months.
 #' @param driftLogLevel             Verbosity of drift-computation log output: "quiet" (concept summary + errors only), "normal" (default; all phase logs), or "verbose".
 #'

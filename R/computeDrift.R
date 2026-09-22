@@ -14,7 +14,24 @@
 #' frame (qData) that numeric_stats consumes, splits it by
 #' (measurement_concept_id, unit_concept_id) and computes per-month distributional
 #' comparisons against (a) a fixed origin baseline and (b) a rolling current
-#' regime baseline. Uses bcp for probabilistic regime detection.
+#' regime baseline.
+#'
+#' Detection algorithm (v1, replacing v0's bcp on (mean, sd)):
+#'   * Change-point detection: `changepoint.np::cpt.np` (PELT with non-parametric
+#'     empirical-distribution cost) applied to monthly medians. Non-parametric
+#'     is robust to non-Gaussian distributions; medians are robust to single-
+#'     month outlier spikes. Together this prevents the bcp pathology where a
+#'     spike month contaminates its own regime baseline.
+#'   * Individual-month outlier flag: Hampel filter (rolling median + rolling
+#'     MAD) applied to monthly means. Reports extreme single-month spikes
+#'     explicitly via `is_extreme_month`, which is what the distributional
+#'     detector can miss when the outlier is absorbed into its own regime.
+#'   * Anomaly flag: OR of two conditions - PSI-against-current-regime above
+#'     threshold, or Wasserstein-against-origin above a data-driven threshold
+#'     calibrated from within-baseline Wasserstein variability. PSI-only
+#'     misses tail excursions because the top quantile bin absorbs them; the
+#'     Wasserstein-OR condition catches them without changing the interpretable
+#'     PSI threshold.
 #'
 #' Produces three CSVs alongside the existing `_stats.csv` outputs:
 #'   * `<baseFilePath>_drift_monthly.csv`   - per (concept, unit, year_month)
@@ -30,14 +47,29 @@
 #' @param originWindowMonths months used to build the fixed origin baseline
 #'                          (default 12).
 #' @param nBins             number of quantile bins for PSI/JSD (default 10).
-#' @param bcpThreshold      posterior probability above which a month starts
-#'                          a new regime (default 0.5).
+#' @param changepointPenalty penalty rule passed to `changepoint.np::cpt.np`.
+#'                          Default "MBIC" (Modified BIC, conservative --
+#'                          preferred for data-quality use where false-positive
+#'                          regime detections are more painful than missed
+#'                          minor shifts).
 #' @param driftPsiThreshold PSI threshold for the anomaly flag (default 0.25).
-#' @param minRegimeMonths   minimum duration (in months) for a bcp-detected
-#'                          segment to count as a real regime. Segments
-#'                          shorter than this are merged into an adjacent
-#'                          regime and the affected months are flagged as
-#'                          anomalies instead. Default 3.
+#' @param wassersteinAnomalyMultiplier multiplier applied to the maximum
+#'                          Wasserstein-against-origin observed among the
+#'                          origin baseline months; a month whose
+#'                          wasserstein_origin exceeds this threshold is
+#'                          OR-flagged as an anomaly. Default 3.
+#' @param hampelWindowMonths half-width (in months) of the rolling Hampel
+#'                          window used for single-month outlier detection.
+#'                          Default 6, so each month is compared against a
+#'                          12-month rolling neighbourhood.
+#' @param hampelThreshold   multiplier applied to the rolling MAD (scaled by
+#'                          1.4826 to be Gaussian-consistent) that defines an
+#'                          extreme month. Default 3.5, following Iglewicz &
+#'                          Hoaglin (1993).
+#' @param minRegimeMonths   minimum duration (in months) for a regime.
+#'                          Enforced natively by `changepoint.np::cpt.np` via
+#'                          `minseglen`, so single-month spike-regimes cannot
+#'                          be created at all. Default 3.
 #' @param memoryBudgetBytes numeric byte figure. When the total observation
 #'                          count for a (concept, unit) group would push
 #'                          memory past `budget / (8 * safetyFactor)`,
@@ -59,8 +91,11 @@
                           minMonthObs = 30,
                           originWindowMonths = 12,
                           nBins = 10,
-                          bcpThreshold = 0.5,
+                          changepointPenalty = "MBIC",
                           driftPsiThreshold = 0.25,
+                          wassersteinAnomalyMultiplier = 3.0,
+                          hampelWindowMonths = 6L,
+                          hampelThreshold = 3.5,
                           minRegimeMonths,
                           memoryBudgetBytes = Inf,
                           safetyFactor = 5,
@@ -145,7 +180,10 @@
     res <- tryCatch(
       .driftForGroup(grp, cid, uid,
                      minMonthObs, originWindowMonths, nBins,
-                     bcpThreshold, driftPsiThreshold, minRegimeMonths,
+                     changepointPenalty, driftPsiThreshold,
+                     wassersteinAnomalyMultiplier,
+                     hampelWindowMonths, hampelThreshold,
+                     minRegimeMonths,
                      memoryBudgetBytes, safetyFactor,
                      driftLogLevel = driftLogLevel),
       error = function(e) {
@@ -188,7 +226,9 @@
 
 .driftForGroup <- function(grp, cid, uid,
                            minMonthObs, originWindowMonths, nBins,
-                           bcpThreshold, driftPsiThreshold,
+                           changepointPenalty, driftPsiThreshold,
+                           wassersteinAnomalyMultiplier,
+                           hampelWindowMonths, hampelThreshold,
                            minRegimeMonths,
                            memoryBudgetBytes = Inf,
                            safetyFactor = 5,
@@ -260,6 +300,7 @@
     dplyr::summarise(
       n_obs_used = dplyr::n(),
       m_mean = mean(.data$value_as_number, na.rm = TRUE),
+      m_median = stats::median(.data$value_as_number, na.rm = TRUE),
       m_sd = stats::sd(.data$value_as_number, na.rm = TRUE),
       values = list(.data$value_as_number),
       .groups = "drop"
@@ -328,9 +369,9 @@
   monthly$psi_current <- NA_real_
   monthly$wasserstein_current <- NA_real_
   monthly$jsd_current <- NA_real_
-  monthly$bcp_posterior <- NA_real_
   monthly$regime_id <- NA_integer_
   monthly$is_regime_start <- FALSE
+  monthly$is_extreme_month <- FALSE
   monthly$is_anomaly <- FALSE
 
   hist_rows <- vector("list", nrow(monthly))
@@ -376,75 +417,97 @@
     tag, as.numeric(difftime(Sys.time(), phase_start, units = "secs"))))
 
   eligible_idx <- which(!monthly$insufficient_data)
-  # bcp needs a meaningful series length to produce useful posteriors. On very
-  # short series (< 6 eligible months) bcp can hang, segfault, or return
-  # degenerate posteriors — none of which help interpretation. Skip gracefully
-  # and treat the whole span as a single regime.
-  min_bcp_months <- 6L
-  if (length(eligible_idx) >= min_bcp_months) {
-    bcp_input <- cbind(
-      mean = monthly$m_mean[eligible_idx],
-      sd = ifelse(is.na(monthly$m_sd[eligible_idx]), 0,
-                  monthly$m_sd[eligible_idx])
+
+  # ---- Individual-month outlier flag (Hampel filter on monthly means) --------
+  # Hampel filter (Hampel 1974; Iglewicz & Hoaglin 1993) is the industrial-SPC
+  # workhorse for isolated-outlier detection. It compares each month's mean
+  # against a rolling median-and-MAD window and flags points more than
+  # `hampelThreshold` scaled-MADs away. Runs on MEANS (extreme-value sensitive)
+  # in parallel with the change-point detector which runs on MEDIANS (robust).
+  # This is the "two-signal" combination current production drift-monitoring
+  # systems ship (see NannyML, Evidently AI, Alibi Detect).
+  if (length(eligible_idx) >= 3) {
+    hampel_flags <- .hampelFilter(
+      monthly$m_mean[eligible_idx],
+      window_half = hampelWindowMonths,
+      threshold = hampelThreshold
     )
+    monthly$is_extreme_month[eligible_idx] <- hampel_flags
     logn(sprintf(
-      "%s bcp: fitting bivariate change-point model on %d months",
-      tag, nrow(bcp_input)))
-    bcp_start <- Sys.time()
-    bcp_post <- tryCatch({
-      # suppressWarnings: bcp emits a benign "built under R x.y.z" message on
-      # first lazy-load; DQD's outer warning handler would otherwise abort.
-      bcp_res <- suppressWarnings(bcp::bcp(bcp_input))
-      as.numeric(bcp_res$posterior.prob)
-    }, error = function(e) {
-      ParallelLogger::logWarn(sprintf(
-        "%s bcp FAILED (input %dx%d, mean range [%.4g,%.4g]): %s",
-        tag, nrow(bcp_input), ncol(bcp_input),
-        min(bcp_input[, "mean"]), max(bcp_input[, "mean"]),
-        conditionMessage(e)))
-      rep(NA_real_, length(eligible_idx))
-    })
-    logn(sprintf(
-      "%s bcp complete (%.1fs, %d posteriors > 0.5)",
-      tag, as.numeric(difftime(Sys.time(), bcp_start, units = "secs")),
-      sum(bcp_post > bcpThreshold, na.rm = TRUE)))
-    monthly$bcp_posterior[eligible_idx] <- bcp_post
-  } else if (length(eligible_idx) > 0) {
-    # Series too short for bcp — skip and let the downstream regime-assignment
-    # code produce a single regime (first-month is_regime_start = TRUE, all
-    # posteriors NA). This still yields origin-vs-current metrics against the
-    # single pooled regime baseline, and prevents bcp from segfaulting on
-    # pathological short series.
-    loga(sprintf(
-      "%s bcp: skipped (only %d eligible months, need >= %d) — treating whole series as one regime",
-      tag, length(eligible_idx), min_bcp_months))
+      "%s hampel outlier stage: %d extreme month(s) flagged (window=%d, threshold=%.1f MADs)",
+      tag, sum(hampel_flags, na.rm = TRUE),
+      hampelWindowMonths, hampelThreshold))
   }
 
-  # Regime assignment operates only on eligible months.
-  # bcp convention (Barry & Hartigan / Erdman & Emerson 2007): posterior.prob[i] is
-  # P(change occurs between position i and i+1); the last element is always NA.
-  # Therefore position i is the LAST observation of the old regime and i+1 is the
-  # FIRST of the new. To flag "is this month the start of a new regime", we shift
-  # the posterior by one lag: is_regime_start[t] <- posterior[t-1] > threshold.
+  # ---- Change-point detection (non-parametric PELT on monthly medians) -------
+  # V1 change from v0's bcp on (mean, sd):
+  #   * MEDIAN input: single-month spikes do not move the median so they cannot
+  #     open a spurious regime — this was the root cause of v0's R2/R3/R4
+  #     pathology on PRBC volume, where spike clusters bracketed by clean
+  #     months became their own artificial regimes.
+  #   * NON-PARAMETRIC cost (empirical distribution, changepoint.np::cpt.np):
+  #     no Gaussian assumption; robust to skew and heavy tails common in
+  #     clinical data. Uses PELT for exact O(n) segmentation given a penalty.
+  #   * minseglen enforced natively: single-month segments cannot exist, so
+  #     the post-hoc .mergeShortRegimes band-aid is no longer needed.
+  # Refs: Killick et al. 2012 (PELT); Haynes et al. 2017 (changepoint.np);
+  # Truong et al. 2020 review recommends non-parametric methods for
+  # "data with unknown distribution or heavy tails."
+  min_cpt_months <- 6L
+  if (length(eligible_idx) >= min_cpt_months) {
+    logn(sprintf(
+      "%s cpt.np: PELT non-parametric on %d monthly medians (penalty=%s, minseglen=%d)",
+      tag, length(eligible_idx), changepointPenalty, minRegimeMonths))
+    cpt_start <- Sys.time()
+    cpt_positions <- tryCatch({
+      medians_here <- monthly$m_median[eligible_idx]
+      # Guard degenerate cases changepoint.np does not handle gracefully.
+      if (length(unique(medians_here[!is.na(medians_here)])) < 2) {
+        integer(0)
+      } else {
+        fit <- changepoint.np::cpt.np(
+          data = medians_here,
+          method = "PELT",
+          penalty = changepointPenalty,
+          minseglen = as.integer(minRegimeMonths)
+        )
+        cp <- changepoint::cpts(fit)
+        # cpts() returns the LAST position of each old segment. Drop a spurious
+        # trailing "end-of-series" position if changepoint.np returns one.
+        cp <- cp[cp < length(medians_here)]
+        as.integer(cp)
+      }
+    }, error = function(e) {
+      ParallelLogger::logWarn(sprintf(
+        "%s cpt.np FAILED (%d months, median range [%.4g,%.4g]): %s -- falling back to single regime",
+        tag, length(eligible_idx),
+        min(monthly$m_median[eligible_idx], na.rm = TRUE),
+        max(monthly$m_median[eligible_idx], na.rm = TRUE),
+        conditionMessage(e)))
+      integer(0)
+    })
+    logn(sprintf(
+      "%s cpt.np complete (%.1fs, %d change point(s))",
+      tag, as.numeric(difftime(Sys.time(), cpt_start, units = "secs")),
+      length(cpt_positions)))
+  } else {
+    if (length(eligible_idx) > 0) {
+      loga(sprintf(
+        "%s cpt.np: skipped (only %d eligible months, need >= %d) -- treating whole series as one regime",
+        tag, length(eligible_idx), min_cpt_months))
+    }
+    cpt_positions <- integer(0)
+  }
+
+  # Regime assignment. change point at position k -> new regime starts at k+1.
+  # First eligible month is always a regime start by definition.
   if (length(eligible_idx) > 0) {
-    posterior_here <- monthly$bcp_posterior[eligible_idx]
     is_start <- rep(FALSE, length(eligible_idx))
     is_start[1] <- TRUE
-    if (length(eligible_idx) >= 2) {
-      lagged <- posterior_here[-length(posterior_here)] > bcpThreshold
-      lagged[is.na(lagged)] <- FALSE
-      is_start[-1] <- is_start[-1] | lagged
-    }
-    # Merge segments shorter than minRegimeMonths into an adjacent regime.
-    # bcp can be noisy — a 1-month "regime" is almost always an anomaly, not
-    # a real baseline change. Merged months keep their high psi_current
-    # (computed later against the merged regime baseline) and therefore get
-    # flagged by the is_anomaly logic downstream.
-    if (minRegimeMonths > 1 && sum(is_start) > 1) {
-      starts <- which(is_start)
-      starts <- .mergeShortRegimes(starts, length(is_start), minRegimeMonths)
-      is_start <- logical(length(is_start))
-      is_start[starts] <- TRUE
+    if (length(cpt_positions) > 0) {
+      new_starts <- cpt_positions + 1L
+      new_starts <- new_starts[new_starts <= length(eligible_idx)]
+      is_start[new_starts] <- TRUE
     }
     monthly$is_regime_start[eligible_idx] <- is_start
     monthly$regime_id[eligible_idx] <- cumsum(is_start)
@@ -484,9 +547,53 @@
     "%s current-regime phase complete (%.1fs)",
     tag, as.numeric(difftime(Sys.time(), regime_start, units = "secs"))))
 
-  monthly$is_anomaly <- !is.na(monthly$psi_current) &
-    monthly$psi_current > driftPsiThreshold &
-    !monthly$is_regime_start
+  # ---- Anomaly flag: OR of PSI-current and Wasserstein-origin ---------------
+  # V1 change from v0's PSI-current-only:
+  #   * PSI-against-current-regime is the interpretable industry-standard signal
+  #     for "distributional shape has shifted from where this regime lives".
+  #     0.25 threshold is the well-known "major shift" benchmark.
+  #   * PSI operates on discrete bins, so it collapses everything above the
+  #     top quantile edge (~p90 of origin) into one bucket and cannot see the
+  #     difference between a 2x mean shift and a 20x mean shift. This is why
+  #     v0 missed the visible 1600-mL PRBC spikes.
+  #   * Wasserstein-against-origin is continuous and tail-sensitive: it grows
+  #     linearly with the magnitude of a tail excursion. Adding it as an OR
+  #     condition catches the tail case without changing the PSI threshold or
+  #     its interpretability.
+  #   * Threshold: `wassersteinAnomalyMultiplier` x the maximum
+  #     wasserstein_origin observed among the origin baseline months
+  #     themselves. Self-calibrating: for a bucket where baseline months
+  #     produce Wasserstein ~40, an anomaly month must exceed 120 (mult=3).
+  #   * Extreme (Hampel-flagged) months are EXCLUDED from the anomaly set --
+  #     they are already reported as `is_extreme_month`, no need to double-flag.
+  w_baseline <- monthly$wasserstein_origin[
+    monthly$year_month %in% origin_months]
+  w_baseline_max <- suppressWarnings(max(w_baseline, na.rm = TRUE))
+  if (!is.finite(w_baseline_max) || w_baseline_max <= 0) {
+    # Origin months have zero-ish Wasserstein against themselves; fall back to
+    # a MAD-based threshold on the whole eligible series.
+    w_all <- monthly$wasserstein_origin[!is.na(monthly$wasserstein_origin)]
+    if (length(w_all) >= 3) {
+      w_med <- stats::median(w_all)
+      w_mad <- 1.4826 * stats::mad(w_all, constant = 1)
+      w_threshold <- w_med + wassersteinAnomalyMultiplier * w_mad
+    } else {
+      w_threshold <- Inf   # cannot Wasserstein-flag anything
+    }
+  } else {
+    w_threshold <- wassersteinAnomalyMultiplier * w_baseline_max
+  }
+  logn(sprintf(
+    "%s anomaly threshold: PSI>%.2f OR Wasserstein_origin>%.2f",
+    tag, driftPsiThreshold, w_threshold))
+
+  psi_hit <- !is.na(monthly$psi_current) &
+    monthly$psi_current > driftPsiThreshold
+  wass_hit <- !is.na(monthly$wasserstein_origin) &
+    monthly$wasserstein_origin > w_threshold
+  monthly$is_anomaly <- (psi_hit | wass_hit) &
+    !monthly$is_regime_start &
+    !monthly$is_extreme_month
 
   # Regime length: number of eligible months in each regime, joined back onto
   # every eligible month. Ineligible months (insufficient data) get NA.
@@ -506,13 +613,15 @@
       "n_obs", "n_obs_used",
       "psi_origin", "wasserstein_origin", "jsd_origin",
       "psi_current", "wasserstein_current", "jsd_current",
-      "bcp_posterior", "regime_id", "regime_length_months",
-      "is_regime_start", "is_anomaly", "insufficient_data"
+      "regime_id", "regime_length_months",
+      "is_regime_start", "is_extreme_month", "is_anomaly",
+      "insufficient_data"
     )
 
   regime_starts <- monthly_out$year_month[monthly_out$is_regime_start]
   regime_start_lengths <- monthly_out$regime_length_months[monthly_out$is_regime_start]
   anomalous <- monthly_out$year_month[monthly_out$is_anomaly]
+  extreme_months <- monthly_out$year_month[monthly_out$is_extreme_month]
   n_regimes <- length(regime_starts)
   current_regime_start <- if (n_regimes > 0) utils::tail(regime_starts, 1) else NA_character_
   current_regime_length <- if (n_regimes > 0) utils::tail(regime_start_lengths, 1) else NA_integer_
@@ -532,6 +641,10 @@
     current_regime_length_months = current_regime_length,
     n_anomalous_months = length(anomalous),
     anomalous_months = paste(anomalous, collapse = ";"),
+    n_extreme_months = length(extreme_months),
+    extreme_months = paste(extreme_months, collapse = ";"),
+    wasserstein_anomaly_threshold =
+      if (is.finite(w_threshold)) w_threshold else NA_real_,
     max_psi_origin = suppressWarnings(max(monthly_out$psi_origin, na.rm = TRUE)),
     max_psi_current = suppressWarnings(max(monthly_out$psi_current, na.rm = TRUE)),
     max_wasserstein_origin = suppressWarnings(max(monthly_out$wasserstein_origin, na.rm = TRUE)),
@@ -1040,20 +1153,47 @@
 # second (drop the boundary AFTER position 1) since position 1 is always the
 # start of the series. All other short segments merge into the previous regime
 # (drop their own boundary).
-.mergeShortRegimes <- function(starts, n_positions, min_length) {
-  if (length(starts) <= 1) return(starts)
-  repeat {
-    lens <- diff(c(starts, n_positions + 1L))
-    short <- which(lens < min_length)
-    if (length(short) == 0) return(starts)
-    if (length(starts) == 1) return(starts)   # nothing left to merge into
-    i <- short[1]
-    if (i == 1L) {
-      starts <- starts[-2]                    # merge regime 1 forward into 2
-    } else {
-      starts <- starts[-i]                    # merge regime i backward into i-1
+# .mergeShortRegimes: retired in v1. Was a post-hoc band-aid for bcp's
+# tendency to open 1-2 month spike-regimes. Replaced by changepoint.np's
+# native `minseglen` argument, which enforces the minimum during segmentation
+# so short spike-regimes are never proposed in the first place.
+
+
+#' Hampel filter for isolated-outlier detection on a time series.
+#'
+#' For each position, compute the median and MAD of the surrounding
+#' `window_half` neighbours on either side (excluding the position itself),
+#' scale the MAD by 1.4826 to be Gaussian-consistent, and flag the position
+#' as an outlier if it lies more than `threshold` scaled MADs from the local
+#' median. Reference: Hampel (1974); Iglewicz & Hoaglin (1993) discuss the
+#' 3.5-MAD default as the modified-z-score outlier threshold.
+#'
+#' @param x A numeric vector.
+#' @param window_half Half-width of the rolling window (number of neighbours
+#'                    on each side). Effective window is `2 * window_half + 1`.
+#' @param threshold Number of scaled-MAD units defining "outlier".
+#'
+#' @return Logical vector of the same length as `x`.
+#'
+#' @keywords internal
+.hampelFilter <- function(x, window_half = 6L, threshold = 3.5) {
+  n <- length(x)
+  flags <- rep(FALSE, n)
+  if (n < 3L) return(flags)
+  for (i in seq_len(n)) {
+    lo <- max(1L, i - window_half)
+    hi <- min(n, i + window_half)
+    neighbours <- x[setdiff(lo:hi, i)]
+    neighbours <- neighbours[!is.na(neighbours)]
+    if (length(neighbours) < 3L) next
+    med <- stats::median(neighbours)
+    mad_val <- 1.4826 * stats::mad(neighbours, constant = 1)
+    if (!is.finite(mad_val) || mad_val <= 0) next
+    if (!is.na(x[i]) && abs(x[i] - med) > threshold * mad_val) {
+      flags[i] <- TRUE
     }
   }
+  flags
 }
 
 
@@ -1257,10 +1397,10 @@
     psi_current = numeric(0),
     wasserstein_current = numeric(0),
     jsd_current = numeric(0),
-    bcp_posterior = numeric(0),
     regime_id = integer(0),
     regime_length_months = integer(0),
     is_regime_start = logical(0),
+    is_extreme_month = logical(0),
     is_anomaly = logical(0),
     insufficient_data = logical(0),
     stringsAsFactors = FALSE
@@ -1284,6 +1424,9 @@
     current_regime_length_months = integer(0),
     n_anomalous_months = integer(0),
     anomalous_months = character(0),
+    n_extreme_months = integer(0),
+    extreme_months = character(0),
+    wasserstein_anomaly_threshold = numeric(0),
     max_psi_origin = numeric(0),
     max_psi_current = numeric(0),
     max_wasserstein_origin = numeric(0),

@@ -76,7 +76,7 @@ calculate_mode <- function(x) {
 #' @param outputFolder              The folder to output logs and SQL files to.
 #' @param patEncSql                 The SQL for patient and encounter statistics
 #' @param cdmVersion                The CDM version (e.g., "5.3", "5.4")
-#' @param resume                    Whether to resume from existing Andromeda files
+#' @param resume                    If TRUE and a per-check Andromeda cache file already exists at `<baseFilePath>.andromeda`, load it and skip re-running the SQL query. If FALSE, or if no cache file is present, run the query and (re)write the cache. Cached Andromeda files are keyed by check name; changing the SQL for a check requires deleting the corresponding `.andromeda` file to avoid loading stale results.
 #' @param computeDrift              Whether to run the temporal drift extension on numeric checks. Default TRUE.
 #' @param minRegimeMonths           Minimum months required for a regime, enforced natively by changepoint.np during segmentation (minseglen). Default 3.
 #' @param driftMemoryBudgetBytes    Per-worker memory budget (in bytes) used to decide when to subsample large months.
@@ -123,21 +123,38 @@ calculate_mode <- function(x) {
           rJava::.jcall(connection@jConnection, "V", "setAutoCommit", TRUE)
         }
       }
-     # check if full query needs to be saved
+      # Extension-check branch: numeric-stats, value-as-concept-stats, and
+      # concept-census checks tag their SQL with the sentinel XXXSAVE_FULL_RESULTXXX
+      # so that the full query result is materialised into an Andromeda cache
+      # file, aggregated in R, and (for numeric checks) fed to the drift
+      # extension. Other checks fall through to the plain violation-count path
+      # in the `else` block below.
       if (grepl('XXXSAVE_FULL_RESULTXXX', sql, TRUE)) {
 
-        # get the visit and person stats for the selected cohort
+        # Person / encounter denominators for the check's cohort, used to
+        # compute percent_patients and percent_visits downstream.
         patEncResult <- DatabaseConnector::querySql(
                                                     connection = connection, sql = patEncSql,
                                                     errorReportFile = errorReportFile,
                                                     snakeCaseToCamelCase = TRUE
       )
 
-        # extract Variable name
-        check_name <- paste(stringr::str_replace(stringr::str_replace(stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX"), "XXX$", ""), "^XXXQUERYNAME___", ""),
-                            tolower(check["cdmTableName"]), sep='_')
+        # Extract the check_name from the sentinel `XXXQUERYNAME___<name>XXX`
+        # marker that runCheck.R renders into the SQL. Appended with the CDM
+        # table name so filenames disambiguate between checks that share a
+        # concept set across the MEASUREMENT and OBSERVATION domains.
+        query_name <- stringr::str_extract(sql, "XXXQUERYNAME___[A-z_0-9_]+XXX")
+        query_name <- stringr::str_replace(query_name, "^XXXQUERYNAME___", "")
+        query_name <- stringr::str_replace(query_name, "XXX$", "")
+        check_name <- paste(query_name,
+                            tolower(check["cdmTableName"]),
+                            sep = "_")
 
-        # SQL already has correct date columns from CSV configuration (rendered in runCheck.R)
+        # Lowercased so column names in the Andromeda result table match the
+        # unquoted references used by the R-side dplyr chains below
+        # (value_as_number, person_id, measurement_datetime, ...). SqlRender
+        # has already handled the dialect translation and date-column
+        # substitution before this point.
         querySQL <- tolower(sql)
 
         # define base file path
@@ -145,12 +162,17 @@ calculate_mode <- function(x) {
         andromedaFile <- paste0(baseFilePath, ".andromeda")
 
         if (resume && file.exists(andromedaFile)) {
+          # Reuse a previously materialised query result. Assumes the cache
+          # matches the current SQL for this check; callers who change SQL
+          # should delete the corresponding .andromeda file.
           ParallelLogger::logInfo(sprintf("Resuming %s from Andromeda", check_name))
           andromedaObject <- Andromeda::loadAndromeda(andromedaFile)
         } else {
           ParallelLogger::logInfo(sprintf("Running %s Query", check_name))
 
-          # Use Andromeda to stream query results (handles memory efficiently)
+          # Stream query results into an Andromeda-backed table so the
+          # working set never has to fit fully in R memory. `appendToTable`
+          # is FALSE so a fresh table replaces any prior content.
           andromedaObject <- Andromeda::andromeda()
 
           DatabaseConnector::querySqlToAndromeda(
@@ -163,7 +185,9 @@ calculate_mode <- function(x) {
             appendToTable = FALSE
           )
 
-          # Save Andromeda for resume capability
+          # Persist to disk so a subsequent run with `resume = TRUE` can skip
+          # the query. `maintainConnection = TRUE` keeps the returned
+          # Andromeda object usable for the aggregations below.
           Andromeda::saveAndromeda(andromeda = andromedaObject,
                                   fileName = andromedaFile,
                                   maintainConnection = TRUE,
@@ -172,8 +196,12 @@ calculate_mode <- function(x) {
         }
         on.exit(Andromeda::close(andromedaObject), add = TRUE)
 
-        # Collect data from Andromeda into R for statistical calculations
-        # SQLite (Andromeda backend) doesn't support quantile, median, sd, mad functions
+        # Materialise the query result into an in-memory data frame for the
+        # per-concept aggregations below. Some of the summary statistics
+        # (quantile with R's default interpolation, `mad`, `calculate_mode`)
+        # are computed R-side rather than in the backing store so their
+        # semantics are portable across Andromeda backends and match the
+        # behaviour of base R.
         ParallelLogger::logInfo(sprintf("Collecting data from Andromeda for %s", check_name))
         qData <- andromedaObject$query_result %>% dplyr::collect()
         rowCount <- nrow(qData)
@@ -284,9 +312,14 @@ calculate_mode <- function(x) {
 
             if (isTRUE(computeDrift)) {
               ParallelLogger::logInfo(sprintf("Computing data drift for %s", check_name))
-              # Isolate drift warnings/errors from the outer tryCatch on .processCheck:
-              # a warning here (e.g., first-time lazy-load of bcp) would otherwise abort
-              # the entire check via the warning handler at the bottom of this function.
+              # Isolate drift warnings and errors from the outer tryCatch on
+              # .processCheck. Without the local handler, a warning raised
+              # inside the drift computation (for example the benign
+              # "package built under R x.y.z" notice that some CRAN packages
+              # emit on first lazy-load) would trigger the outer warning
+              # handler and abort the whole check. Any real error is logged
+              # here and swallowed so numeric-stats output for this check is
+              # still produced.
               tryCatch(
                 withCallingHandlers(
                   .computeDrift(qData = qData, baseFilePath = baseFilePath,
@@ -357,12 +390,12 @@ calculate_mode <- function(x) {
             write.csv(qStats, paste(baseFilePath, 'stats.csv', sep='_'), row.names = FALSE)
           }
 
-          # create table of Values over time
-          # aggregated in the database rather than over the collected qData: each
-          # format() call on a POSIXct column expands to an 11 component POSIXlt of
-          # the full row count, which exhausts memory on the largest tables. The
-          # database returns one row per group instead. strftime() keeps a
-          # zero-padded character year/month.
+          # Monthly time-stats aggregation runs against the Andromeda-backed
+          # table rather than the in-memory `qData`. Calling format() on a
+          # POSIXct column of the full row count would expand each timestamp
+          # into an 11-component POSIXlt, which blows memory on the largest
+          # concepts. Pushing the year/month derivation and the aggregation
+          # down to the backing store returns only one row per group.
           timeQuery <- andromedaObject$query_result %>%
             dplyr::mutate(
               year = strftime(measurement_datetime, "%Y"),
@@ -371,8 +404,10 @@ calculate_mode <- function(x) {
 
           if (grepl('VALUE_AS_NUMBER_CHECK', sql, TRUE)) {
             ParallelLogger::logInfo(sprintf("Calculating Numeric Time Stats for %s", check_name))
-            # standard_deviation is derived from sum(x) and sum(x*x) so the whole
-            # aggregation stays in SQLite (no quantile/sd support there) and the
+            # Standard deviation is derived from the two-pass formula in
+            # terms of sum(x), sum(x*x), and n rather than a built-in `sd()`
+            # so the whole aggregation runs in the backing store (whose
+            # supported aggregate function set is a subset of R's). The
             # collected result is one row per (concept, unit, year, month).
             numeric_time_stats <- dplyr::bind_rows(
               timeQuery %>%

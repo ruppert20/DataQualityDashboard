@@ -8,86 +8,92 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-#' Compute data drift metrics for a numeric CDM field.
+#' Compute temporal drift metrics for a numeric CDM field.
 #'
-#' Extension of the numeric_stats analysis. Reuses the same collected Andromeda
-#' frame (qData) that numeric_stats consumes, splits it by
-#' (measurement_concept_id, unit_concept_id) and computes per-month distributional
-#' comparisons against (a) a fixed origin baseline and (b) a rolling current
-#' regime baseline.
+#' Extension of the numeric_stats analysis. Reuses the collected Andromeda
+#' frame (qData) that numeric_stats consumes, groups it by
+#' (measurement_concept_id, unit_concept_id), and computes per-month
+#' distributional comparisons against both the concept's first-regime baseline
+#' and each month's own containing-regime baseline.
 #'
-#' Detection algorithm (v1, replacing v0's bcp on (mean, sd)):
-#'   * Change-point detection: `changepoint.np::cpt.np` (PELT with non-parametric
-#'     empirical-distribution cost) applied to monthly medians. Non-parametric
-#'     is robust to non-Gaussian distributions; medians are robust to single-
-#'     month outlier spikes. Together this prevents the bcp pathology where a
-#'     spike month contaminates its own regime baseline.
-#'   * Origin baseline is the FIRST regime (R1) identified by the change-point
-#'     detector, not a fixed-length window. This guarantees the reference
-#'     distribution is single-regime by construction and eliminates the
-#'     v0/v1-early pathology in which a fixed 12-month window could straddle
-#'     a regime boundary (making the "baseline" itself a mixture of two
-#'     distinct states).
-#'   * Individual-month outlier flag: Hampel filter (rolling median + rolling
-#'     MAD) applied to monthly means. Reports extreme single-month spikes
-#'     explicitly via `is_extreme_month`, which is what the distributional
-#'     detector can miss when the outlier is absorbed into its own regime.
-#'   * Anomaly flag: OR of two conditions - PSI-against-current-regime above
-#'     threshold, or Wasserstein-against-origin above a data-driven threshold
-#'     calibrated from within-baseline Wasserstein variability. PSI-only
-#'     misses tail excursions because the top quantile bin absorbs them; the
-#'     Wasserstein-OR condition catches them without changing the interpretable
-#'     PSI threshold.
+#' Detection pipeline:
+#'   * Change-point segmentation: `changepoint.np::cpt.np` with PELT and a
+#'     non-parametric empirical-distribution cost, applied to monthly medians.
+#'     Non-parametric cost makes no distributional assumption; using medians
+#'     (rather than means) as the input keeps isolated single-month outliers
+#'     from opening spurious regimes. `minRegimeMonths` is enforced natively
+#'     by `minseglen` during segmentation. Refs: Killick, Fearnhead & Eckley
+#'     (2012) for PELT; Haynes, Fearnhead & Eckley (2017) for the
+#'     non-parametric cost.
+#'   * Origin baseline: the pooled raw values of the first regime (R1)
+#'     identified by the change-point detector. Because R1 is single-regime
+#'     by construction, the reference distribution used for all
+#'     `*_origin` comparisons is coherent (does not straddle a regime
+#'     boundary).
+#'   * Individual-month outlier flag: Hampel filter (Hampel 1974; Iglewicz &
+#'     Hoaglin 1993) applied to monthly means, with a rolling window of
+#'     `hampelWindowMonths` on each side and a threshold of `hampelThreshold`
+#'     scaled-MAD units. Reported per month via `is_extreme_month`.
+#'   * Anomaly flag: OR of two conditions -- PSI against the current regime
+#'     above `driftPsiThreshold` (0.25 = "major shift" per common industry
+#'     use), or Wasserstein-1 distance to the origin baseline above a
+#'     data-driven threshold defined as `wassersteinAnomalyMultiplier` times
+#'     the maximum Wasserstein observed within the origin baseline itself.
+#'     Extreme-month and regime-start months are excluded from the anomaly
+#'     set so each month carries at most one flag.
 #'
-#' Produces three CSVs alongside the existing `_stats.csv` outputs:
-#'   * `<baseFilePath>_drift_monthly.csv`   - per (concept, unit, year_month)
-#'   * `<baseFilePath>_drift_summary.csv`   - per (concept, unit)
-#'   * `<baseFilePath>_drift_histogram.csv` - per (concept, unit, year_month, bin)
+#' Per (concept, unit) group, emits three CSVs alongside the existing
+#' `_stats.csv` outputs:
+#'   * `<baseFilePath>_drift_monthly.csv`   -- per (concept, unit, year_month)
+#'   * `<baseFilePath>_drift_summary.csv`   -- per (concept, unit)
+#'   * `<baseFilePath>_drift_histogram.csv` -- per (concept, unit, year_month, bin)
 #'
-#' Each CSV also contains rows for the pooled bucket x unit grouping, with
-#' `measurement_concept_id = "IC3_<bucket>_overall"`, matching the roll-up
-#' convention that the numeric_stats check uses in `aggregated_stats.csv` and
-#' `_numeric_time_stats.csv`. The pooled group re-runs the full drift pipeline
-#' on the union of raw values across all concepts sharing a unit within the
-#' bucket. Analysts filter by concept_id suffix to select per-concept vs.
-#' pooled views.
+#' Each CSV additionally contains rows for the pooled bucket-by-unit grouping,
+#' with `measurement_concept_id = "IC3_<bucket>_overall"`. This matches the
+#' roll-up convention used by numeric_stats in `aggregated_stats.csv` and
+#' `_numeric_time_stats.csv`. The pooled group runs the same pipeline over
+#' the union of raw values across all concepts sharing a unit within the
+#' bucket. Analysts filter by the `_overall` suffix on `measurement_concept_id`
+#' to select the per-concept or the pooled view.
 #'
 #' @param qData             data frame collected from Andromeda; must contain
 #'                          columns measurement_concept_id, unit_concept_id,
 #'                          measurement_datetime, value_as_number.
 #' @param baseFilePath      file path prefix (same convention as numeric_stats).
-#' @param minMonthObs       minimum non-NA observations for a month to be
-#'                          included in drift computation (default 30).
-#' @param nBins             number of quantile bins for PSI/JSD (default 10).
-#' @param changepointPenalty penalty rule passed to `changepoint.np::cpt.np`.
-#'                          Default "MBIC" (Modified BIC, conservative --
-#'                          preferred for data-quality use where false-positive
-#'                          regime detections are more painful than missed
-#'                          minor shifts).
-#' @param driftPsiThreshold PSI threshold for the anomaly flag (default 0.25).
-#' @param wassersteinAnomalyMultiplier multiplier applied to the maximum
+#' @param minMonthObs       Minimum non-NA observations for a month to be
+#'                          included in drift computation. Default 30.
+#' @param nBins             Requested number of quantile bins for PSI and JSD.
+#'                          The realised bin count can be lower if the origin
+#'                          baseline has ties at the quantile breakpoints.
+#'                          Default 10.
+#' @param changepointPenalty Penalty rule passed to `changepoint.np::cpt.np`.
+#'                          Default "MBIC" (Modified BIC), which is
+#'                          conservative and preferred for data-quality use
+#'                          where false-positive regime detections are more
+#'                          costly than missing minor shifts.
+#' @param driftPsiThreshold PSI threshold for the anomaly flag. Default 0.25.
+#' @param wassersteinAnomalyMultiplier Multiplier applied to the maximum
 #'                          Wasserstein-against-origin observed among the
-#'                          origin baseline months; a month whose
-#'                          wasserstein_origin exceeds this threshold is
+#'                          origin baseline months. A month whose
+#'                          `wasserstein_origin` exceeds this threshold is
 #'                          OR-flagged as an anomaly. Default 3.
-#' @param hampelWindowMonths half-width (in months) of the rolling Hampel
+#' @param hampelWindowMonths Half-width (in months) of the rolling Hampel
 #'                          window used for single-month outlier detection.
-#'                          Default 6, so each month is compared against a
-#'                          12-month rolling neighbourhood.
-#' @param hampelThreshold   multiplier applied to the rolling MAD (scaled by
-#'                          1.4826 to be Gaussian-consistent) that defines an
-#'                          extreme month. Default 3.5, following Iglewicz &
-#'                          Hoaglin (1993).
-#' @param minRegimeMonths   minimum duration (in months) for a regime.
-#'                          Enforced natively by `changepoint.np::cpt.np` via
-#'                          `minseglen`, so single-month spike-regimes cannot
-#'                          be created at all. Default 3.
-#' @param memoryBudgetBytes numeric byte figure. When the total observation
+#'                          The effective window is
+#'                          `2 * hampelWindowMonths + 1`. Default 6.
+#' @param hampelThreshold   Multiplier applied to the scaled rolling MAD
+#'                          (MAD * 1.4826) that defines an extreme month.
+#'                          Default 3.5, following Iglewicz & Hoaglin (1993).
+#' @param minRegimeMonths   Minimum duration (in months) for a regime,
+#'                          enforced natively by `changepoint.np::cpt.np`
+#'                          via `minseglen`. Default 3.
+#' @param memoryBudgetBytes Numeric byte figure. When the total observation
 #'                          count for a (concept, unit) group would push
-#'                          memory past `budget / (8 * safetyFactor)`,
-#'                          months are subsampled to fit. `Inf` (default)
-#'                          disables subsampling.
-#' @param safetyFactor      overhead multiplier applied to the raw
+#'                          memory past `budget / (8 * safetyFactor)` (8 is
+#'                          the size of an R double in bytes), months are
+#'                          subsampled to fit. `Inf` (default) disables
+#'                          subsampling.
+#' @param safetyFactor      Overhead multiplier applied to the raw
 #'                          byte-per-value figure to account for dplyr
 #'                          intermediate copies, Wasserstein sort buffers,
 #'                          and per-row data.frame overhead. Default 5.
@@ -155,13 +161,12 @@
     return(invisible(emptyOutputs))
   }
 
-  # Split-once by (concept, unit) instead of filtering df on each iteration.
-  # Filtering was O(n_rows) per iteration = O(n_groups * n_rows) overall —
-  # painfully slow when qData is large and there are many concept-unit pairs.
-  # split() returns a list of integer row indices keyed by group; subsetting
-  # df once per key is O(group_size), so the loop is O(n_rows) total.
+  # Partition once by (concept, unit) so the downstream loop is O(nrow(df))
+  # total rather than O(n_groups * nrow(df)). `split()` returns row indices
+  # keyed by group; each iteration subsets `df` by index in O(group_size).
+  # ASCII unit separator (0x1F) is used so the key can be split back apart
+  # unambiguously.
   t_split <- Sys.time()
-  # Use ASCII unit separator so we can reliably split the key back apart.
   key <- paste(df$measurement_concept_id,
                df$unit_concept_id,
                sep = "\x1f")
@@ -210,31 +215,29 @@
       summary_all[[i]] <- res$summary
       histogram_all[[i]] <- res$histogram
     }
-    # Between-concept cleanup: R's GC is lazy and `grp` (the just-processed
-    # concept's rows) plus all the transient list-columns can retain many GB
-    # for a huge concept. Explicit cleanup here so the next concept starts
-    # from a cleaner heap. Observed the residual carrying forward as ~4.6 GB
-    # from a 12.5 GB peak concept — that's a real problem for a subsequent
-    # concept that also happens to be large.
+    # Explicit cleanup between groups. Large concepts leave transient
+    # list-columns (values per month, presorted pools, histogram rows) that
+    # R's garbage collector will hold onto for several groups otherwise;
+    # forcing a full GC here bounds the working set for the subsequent group.
     rm(grp, res)
     invisible(gc(verbose = FALSE, full = TRUE))
   }
 
-  # ---- Pooled bucket x unit passes ------------------------------------------
-  # Mirrors the "IC3_<bucket>_overall" grouping the numeric_stats check
-  # already writes into aggregated_stats.csv / numeric_time_stats.csv: for
-  # each unit_concept_id present in the bucket, pool the raw values across
-  # ALL concepts sharing that unit and re-run the same drift pipeline against
-  # the pooled distribution. Emits rows with measurement_concept_id set to
-  # "IC3_<bucket>_overall" so downstream joins by concept can filter them
-  # out or keep them by suffix.
+  # ---- Pooled bucket-by-unit passes -----------------------------------------
+  # For each unit_concept_id present in the bucket, pool the raw values
+  # across all concepts sharing that unit and run the drift pipeline over
+  # the pooled distribution. The output rows carry
+  # `measurement_concept_id = "IC3_<bucket>_overall"`, matching the roll-up
+  # convention that numeric_stats uses in aggregated_stats.csv and
+  # numeric_time_stats.csv.
   #
-  # Rationale: per-(concept, unit) drift can miss shifts that only reveal
-  # themselves once similar concepts are pooled -- e.g. a deprecated concept
-  # being silently absorbed by a synonymous one, which looks stable in each
-  # concept individually but shows a level shift at the unit-level pool. The
-  # extension emits the per-concept and pooled views side-by-side; the
-  # analyst decides which is appropriate for a given clinical variable.
+  # Per-(concept, unit) drift and pooled drift answer different questions:
+  # the per-concept view catches shifts specific to a single coding of the
+  # measurement; the pooled view catches shifts that are only visible after
+  # aggregating synonymous concepts (for example, when observations migrate
+  # between concept ids over time while the underlying measurement is
+  # unchanged). Both are emitted so the analyst can choose the appropriate
+  # view for a given clinical variable.
   bucket_name <- basename(baseFilePath)
   overall_cid <- paste0(bucket_name, "_overall")
   unit_key <- ifelse(is.na(df$unit_concept_id), "\x1fNA",
@@ -295,6 +298,40 @@
 }
 
 
+#' Compute the full drift pipeline for a single (concept, unit) group or
+#' pooled bucket-by-unit group.
+#'
+#' Runs the following steps in order on the pre-filtered rows for one group:
+#'   1. Memory-adaptive per-month subsampling (when a memory budget is set).
+#'   2. Monthly aggregation to per-month n, mean, median, sd, and list-column
+#'      of raw values.
+#'   3. Hampel filter on monthly means -> `is_extreme_month`.
+#'   4. Non-parametric change-point segmentation on monthly medians via
+#'      `changepoint.np::cpt.np` -> `regime_id`, `is_regime_start`.
+#'   5. Origin baseline construction from the first regime's pooled values,
+#'      then per-month PSI / Wasserstein-1 / JSD against that baseline.
+#'   6. Per-month PSI / Wasserstein-1 / JSD against each month's containing
+#'      regime's baseline.
+#'   7. Anomaly flag `is_anomaly` (PSI-current above threshold OR
+#'      Wasserstein-origin above data-driven threshold; extreme and
+#'      regime-start months excluded).
+#'   8. Trend, seasonality, and bimodality diagnostics; rule-based pattern
+#'      classification; priority score.
+#'
+#' @param grp Data frame of the rows that belong to this group (already
+#'   filtered by the caller). Must contain columns value_as_number,
+#'   year_month, measurement_concept_id.
+#' @param cid `measurement_concept_id` label for the emitted rows. For a
+#'   pooled group this is `"IC3_<bucket>_overall"`.
+#' @param uid `unit_concept_id` label for the emitted rows.
+#' @param minMonthObs,nBins,changepointPenalty,driftPsiThreshold,wassersteinAnomalyMultiplier,hampelWindowMonths,hampelThreshold,minRegimeMonths,memoryBudgetBytes,safetyFactor,driftLogLevel
+#'   See `.computeDrift`.
+#'
+#' @return List with elements `monthly`, `summary`, `histogram`, or NULL if
+#'   the group cannot be processed (fewer than two monthly rows, no eligible
+#'   month, degenerate baseline).
+#'
+#' @keywords internal
 .driftForGroup <- function(grp, cid, uid,
                            minMonthObs, nBins,
                            changepointPenalty, driftPsiThreshold,
@@ -319,7 +356,7 @@
   gc_reset <- gc(verbose = FALSE, reset = TRUE)
   t0 <- Sys.time()
   logn(sprintf(
-    "%s entry: %d rows across candidate months (concept size before grouping)",
+    "%s entry: %d rows (before monthly grouping)",
     tag, nrow(grp)))
 
   # ---- Memory-adaptive per-month subsampling ---------------------------------
@@ -413,13 +450,14 @@
   }
 
   # ---- Individual-month outlier flag (Hampel filter on monthly means) --------
-  # Hampel filter (Hampel 1974; Iglewicz & Hoaglin 1993) is the industrial-SPC
-  # workhorse for isolated-outlier detection. It compares each month's mean
-  # against a rolling median-and-MAD window and flags points more than
-  # `hampelThreshold` scaled-MADs away. Runs on MEANS (extreme-value sensitive)
-  # in parallel with the change-point detector which runs on MEDIANS (robust).
-  # This is the "two-signal" combination current production drift-monitoring
-  # systems ship (see NannyML, Evidently AI, Alibi Detect).
+  # Hampel filter (Hampel 1974; Iglewicz & Hoaglin 1993). Compares each
+  # month's mean against a rolling median-and-MAD window and flags points
+  # more than `hampelThreshold` scaled-MAD units from the local median. Runs
+  # on monthly means (sensitive to extreme values), in parallel with the
+  # change-point detector below (which runs on monthly medians and is
+  # therefore robust to isolated outliers). Together, the two produce
+  # separate flags for isolated-month outliers and for sustained
+  # distributional shifts.
   if (length(eligible_idx) >= 3) {
     hampel_flags <- .hampelFilter(
       monthly$m_mean[eligible_idx],
@@ -433,20 +471,12 @@
       hampelWindowMonths, hampelThreshold))
   }
 
-  # ---- Change-point detection (non-parametric PELT on monthly medians) -------
-  # V1 change from v0's bcp on (mean, sd):
-  #   * MEDIAN input: single-month spikes do not move the median so they cannot
-  #     open a spurious regime — this was the root cause of v0's R2/R3/R4
-  #     pathology on PRBC volume, where spike clusters bracketed by clean
-  #     months became their own artificial regimes.
-  #   * NON-PARAMETRIC cost (empirical distribution, changepoint.np::cpt.np):
-  #     no Gaussian assumption; robust to skew and heavy tails common in
-  #     clinical data. Uses PELT for exact O(n) segmentation given a penalty.
-  #   * minseglen enforced natively: single-month segments cannot exist, so
-  #     the post-hoc .mergeShortRegimes band-aid is no longer needed.
-  # Refs: Killick et al. 2012 (PELT); Haynes et al. 2017 (changepoint.np);
-  # Truong et al. 2020 review recommends non-parametric methods for
-  # "data with unknown distribution or heavy tails."
+  # ---- Change-point segmentation (non-parametric PELT on monthly medians) ---
+  # PELT (Killick, Fearnhead & Eckley 2012) with the non-parametric empirical
+  # distribution cost (Haynes, Fearnhead & Eckley 2017) as implemented in
+  # `changepoint.np::cpt.np`. Uses monthly medians as input so isolated
+  # single-month outliers do not open spurious regimes. `minseglen` is
+  # honoured natively during segmentation.
   min_cpt_months <- 6L
   if (length(eligible_idx) >= min_cpt_months) {
     logn(sprintf(
@@ -455,7 +485,9 @@
     cpt_start <- Sys.time()
     cpt_positions <- tryCatch({
       medians_here <- monthly$m_median[eligible_idx]
-      # Guard degenerate cases changepoint.np does not handle gracefully.
+      # A constant or near-constant median series has no meaningful
+      # change-point structure; return no change points rather than let
+      # changepoint.np error.
       if (length(unique(medians_here[!is.na(medians_here)])) < 2) {
         integer(0)
       } else {
@@ -466,14 +498,15 @@
           minseglen = as.integer(minRegimeMonths)
         )
         cp <- changepoint::cpts(fit)
-        # cpts() returns the LAST position of each old segment. Drop a spurious
-        # trailing "end-of-series" position if changepoint.np returns one.
+        # `cpts()` returns the last position of each pre-change segment.
+        # Drop any trailing end-of-series position so `cp + 1` in the
+        # regime-assignment step never exceeds the series length.
         cp <- cp[cp < length(medians_here)]
         as.integer(cp)
       }
     }, error = function(e) {
       ParallelLogger::logWarn(sprintf(
-        "%s cpt.np FAILED (%d months, median range [%.4g,%.4g]): %s -- falling back to single regime",
+        "%s cpt.np failed (%d months, median range [%.4g, %.4g]): %s. Falling back to a single-regime segmentation.",
         tag, length(eligible_idx),
         min(monthly$m_median[eligible_idx], na.rm = TRUE),
         max(monthly$m_median[eligible_idx], na.rm = TRUE),
@@ -487,7 +520,7 @@
   } else {
     if (length(eligible_idx) > 0) {
       loga(sprintf(
-        "%s cpt.np: skipped (only %d eligible months, need >= %d) -- treating whole series as one regime",
+        "%s cpt.np skipped (only %d eligible months, need >= %d); treating whole series as one regime",
         tag, length(eligible_idx), min_cpt_months))
     }
     cpt_positions <- integer(0)
@@ -507,13 +540,12 @@
     monthly$regime_id[eligible_idx] <- cumsum(is_start)
   }
 
-  # ---- Origin baseline: pooled values of R1 ---------------------------------
-  # V1 fix: baseline is the first regime the change-point detector identified,
-  # not a fixed-length window. This guarantees the reference distribution is
-  # single-regime by construction. Previously (v0 and v1-early) a fixed 12-
-  # month window could straddle a regime boundary, making the baseline itself
-  # a mixture of two states -- which then desensitized every downstream PSI/
-  # Wasserstein/JSD-against-origin comparison.
+  # ---- Origin baseline: pooled values of the first regime -------------------
+  # The origin baseline is the pooled raw values of the first regime the
+  # change-point detector identified. Using R1 (rather than a fixed-length
+  # calendar window) ensures the reference distribution used by all
+  # `*_origin` comparisons is single-regime by construction and therefore
+  # never straddles a segmentation boundary.
   r1_idx <- which(monthly$regime_id == 1L & !monthly$insufficient_data)
   origin_months <- monthly$year_month[r1_idx]
   origin_values <- unlist(monthly$values[r1_idx], use.names = FALSE)
@@ -616,37 +648,40 @@
     tag, as.numeric(difftime(Sys.time(), regime_start, units = "secs"))))
 
   # ---- Anomaly flag: OR of PSI-current and Wasserstein-origin ---------------
-  # V1 change from v0's PSI-current-only:
-  #   * PSI-against-current-regime is the interpretable industry-standard signal
-  #     for "distributional shape has shifted from where this regime lives".
-  #     0.25 threshold is the well-known "major shift" benchmark.
-  #   * PSI operates on discrete bins, so it collapses everything above the
-  #     top quantile edge (~p90 of origin) into one bucket and cannot see the
-  #     difference between a 2x mean shift and a 20x mean shift. This is why
-  #     v0 missed the visible 1600-mL PRBC spikes.
-  #   * Wasserstein-against-origin is continuous and tail-sensitive: it grows
-  #     linearly with the magnitude of a tail excursion. Adding it as an OR
-  #     condition catches the tail case without changing the PSI threshold or
-  #     its interpretability.
-  #   * Threshold: `wassersteinAnomalyMultiplier` x the maximum
-  #     wasserstein_origin observed among the origin baseline months
-  #     themselves. Self-calibrating: for a bucket where baseline months
-  #     produce Wasserstein ~40, an anomaly month must exceed 120 (mult=3).
-  #   * Extreme (Hampel-flagged) months are EXCLUDED from the anomaly set --
-  #     they are already reported as `is_extreme_month`, no need to double-flag.
+  # Two complementary signals:
+  #   * PSI against the current regime's baseline is the interpretable,
+  #     industry-standard signal for "distributional shape has shifted from
+  #     where this regime lives"; the 0.25 threshold is the common
+  #     "major shift" convention.
+  #   * PSI operates on discrete bins, so all values above the top quantile
+  #     edge fall into a single bucket and PSI cannot distinguish moderate
+  #     from extreme tail excursions. Wasserstein-1 to the origin baseline
+  #     is continuous and tail-sensitive; adding it as an OR condition
+  #     captures tail excursions without changing the PSI threshold.
+  #
+  # Wasserstein threshold: `wassersteinAnomalyMultiplier` times the maximum
+  # Wasserstein observed within the origin baseline months. This is
+  # self-calibrating; for a bucket in which within-baseline Wasserstein is
+  # typically ~40, an anomaly month must exceed ~120 at multiplier 3.
+  #
+  # Extreme-month rows (Hampel-flagged) are excluded from `is_anomaly` so
+  # each month carries at most one of the three flag categories
+  # (`is_regime_start`, `is_extreme_month`, `is_anomaly`).
   w_baseline <- monthly$wasserstein_origin[
     monthly$year_month %in% origin_months]
   w_baseline_max <- suppressWarnings(max(w_baseline, na.rm = TRUE))
   if (!is.finite(w_baseline_max) || w_baseline_max <= 0) {
-    # Origin months have zero-ish Wasserstein against themselves; fall back to
-    # a MAD-based threshold on the whole eligible series.
+    # Origin months have effectively zero Wasserstein against themselves
+    # (for example, when there is only a single origin month). Fall back to a
+    # MAD-based threshold on the full eligible Wasserstein series.
     w_all <- monthly$wasserstein_origin[!is.na(monthly$wasserstein_origin)]
     if (length(w_all) >= 3) {
       w_med <- stats::median(w_all)
       w_mad <- 1.4826 * stats::mad(w_all, constant = 1)
       w_threshold <- w_med + wassersteinAnomalyMultiplier * w_mad
     } else {
-      w_threshold <- Inf   # cannot Wasserstein-flag anything
+      # Fewer than 3 usable Wasserstein values; disable the Wasserstein arm.
+      w_threshold <- Inf
     }
   } else {
     w_threshold <- wassersteinAnomalyMultiplier * w_baseline_max
@@ -839,9 +874,9 @@
   summary_out$pattern_type <- cls$pattern_type
   summary_out$pattern_tags <- cls$pattern_tags
 
-  # Subsampling annotations (per user request): report how much of the raw
-  # data actually fed the drift calculation. If nothing was subsampled,
-  # n_obs_used == n_obs and pct_obs_used == 100.
+  # Subsampling audit: record how much of the raw data actually fed the
+  # drift calculation. When no subsampling occurred, `n_obs_used == n_obs`
+  # and `pct_obs_used == 100`.
   total_obs_original <- sum(monthly_out$n_obs, na.rm = TRUE)
   total_obs_used <- sum(monthly_out$n_obs_used, na.rm = TRUE)
   summary_out$total_obs_original <- as.integer(total_obs_original)
@@ -919,11 +954,12 @@
 }
 
 
-# All three wrappers take optional ctx/month/which context so that on a native
-# crash or R error we log WHICH concept + WHICH month + WHICH call point died,
-# with the input sizes. Without this a segfault in transport::wasserstein1d
-# gives R "session terminated" and nothing else — no way to know which specific
-# comparison killed things.
+# Each wrapper accepts optional `ctx` and `month` arguments used only for
+# diagnostic logging. When an underlying native call errors (or crashes the
+# session), the wrapper records which concept, which month, and which call
+# site produced the failure, together with the input sizes. Without this
+# context, a native-side segfault would produce only R's generic "session
+# terminated" message.
 .jsdSafe <- function(p, q, ctx = NULL, month = NULL) {
   tryCatch({
     val <- suppressMessages(
@@ -973,15 +1009,12 @@
 }
 
 
-# Byte-for-byte identical to transport::wasserstein1d(a, b_original, p = 1)
-# when b_sorted is sort(b_original) and all weights are 1. Skips only the
-# redundant `order(b) + b[ordb] + wb[ordb]` step, so the arithmetic sequence
-# is otherwise mathematically unchanged and IEEE-754 output matches bit-for-bit.
-# Verified across 300 randomized trials (equal + unequal sizes) — zero
-# mismatches, zero absolute difference.
-#
-# The pool sort is O(n log n); on a 35M-value origin pool called 127 times
-# per concept, this saves the full cost of 126 repeated sorts.
+# Wasserstein-1 with a presorted pool. Numerically identical to
+# `transport::wasserstein1d(a, b_original, p = 1)` when
+# `b_sorted == sort(b_original)` and all weights are 1, but skips the
+# redundant sort of `b`. The optimisation matters because a large origin
+# pool is compared against many months per group; sorting the pool once
+# saves the cost of one sort per comparison.
 .wasserstein1PresortedPool <- function(a, b_sorted,
                                        ctx = NULL, month = NULL) {
   tryCatch({
@@ -1045,11 +1078,12 @@
 }
 
 
-# Cross-platform "how much RAM can I use right now" probe.
-# Linux reads /proc/meminfo (MemAvailable is what the kernel thinks apps can
-# claim without swapping); macOS parses vm_stat's free + inactive pages;
-# Windows queries FreePhysicalMemory via wmic. Returns NA on any failure,
-# and the caller falls back to no-subsampling in that case.
+# Cross-platform available-memory probe used by the "auto" memory budget
+# resolution. On Linux, reads MemAvailable from /proc/meminfo (the kernel's
+# estimate of memory an application can allocate without swapping). On
+# macOS, sums free and inactive pages reported by `vm_stat`. On Windows,
+# queries FreePhysicalMemory via `wmic`. Returns NA on any failure; the
+# caller falls back to disabling subsampling in that case.
 .availableMemoryBytes <- function() {
   sysname <- unname(Sys.info()["sysname"])
   bytes <- NA_real_
@@ -1216,15 +1250,9 @@
 }
 
 
-# Iteratively drop regime-start boundaries whose following segment is shorter
-# than min_length. When the first segment is too short, we merge it into the
-# second (drop the boundary AFTER position 1) since position 1 is always the
-# start of the series. All other short segments merge into the previous regime
-# (drop their own boundary).
-# .mergeShortRegimes: retired in v1. Was a post-hoc band-aid for bcp's
-# tendency to open 1-2 month spike-regimes. Replaced by changepoint.np's
-# native `minseglen` argument, which enforces the minimum during segmentation
-# so short spike-regimes are never proposed in the first place.
+# Minimum regime length is enforced during segmentation via
+# `changepoint.np::cpt.np(..., minseglen = minRegimeMonths)`, so no post-hoc
+# merge of short regimes is required.
 
 
 #' Hampel filter for isolated-outlier detection on a time series.

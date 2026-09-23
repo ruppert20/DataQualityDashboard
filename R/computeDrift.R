@@ -44,6 +44,14 @@
 #'   * `<baseFilePath>_drift_summary.csv`   - per (concept, unit)
 #'   * `<baseFilePath>_drift_histogram.csv` - per (concept, unit, year_month, bin)
 #'
+#' Each CSV also contains rows for the pooled bucket x unit grouping, with
+#' `measurement_concept_id = "IC3_<bucket>_overall"`, matching the roll-up
+#' convention that the numeric_stats check uses in `aggregated_stats.csv` and
+#' `_numeric_time_stats.csv`. The pooled group re-runs the full drift pipeline
+#' on the union of raw values across all concepts sharing a unit within the
+#' bucket. Analysts filter by concept_id suffix to select per-concept vs.
+#' pooled views.
+#'
 #' @param qData             data frame collected from Andromeda; must contain
 #'                          columns measurement_concept_id, unit_concept_id,
 #'                          measurement_datetime, value_as_number.
@@ -212,16 +220,76 @@
     invisible(gc(verbose = FALSE, full = TRUE))
   }
 
+  # ---- Pooled bucket x unit passes ------------------------------------------
+  # Mirrors the "IC3_<bucket>_overall" grouping the numeric_stats check
+  # already writes into aggregated_stats.csv / numeric_time_stats.csv: for
+  # each unit_concept_id present in the bucket, pool the raw values across
+  # ALL concepts sharing that unit and re-run the same drift pipeline against
+  # the pooled distribution. Emits rows with measurement_concept_id set to
+  # "IC3_<bucket>_overall" so downstream joins by concept can filter them
+  # out or keep them by suffix.
+  #
+  # Rationale: per-(concept, unit) drift can miss shifts that only reveal
+  # themselves once similar concepts are pooled -- e.g. a deprecated concept
+  # being silently absorbed by a synonymous one, which looks stable in each
+  # concept individually but shows a level shift at the unit-level pool. The
+  # extension emits the per-concept and pooled views side-by-side; the
+  # analyst decides which is appropriate for a given clinical variable.
+  bucket_name <- basename(baseFilePath)
+  overall_cid <- paste0(bucket_name, "_overall")
+  unit_key <- ifelse(is.na(df$unit_concept_id), "\x1fNA",
+                     as.character(df$unit_concept_id))
+  rows_by_unit <- split(seq_len(nrow(df)), unit_key)
+  n_pool <- length(rows_by_unit)
+  logn(sprintf(
+    "[drift] pooling into %d (bucket x unit) group(s) for %s",
+    n_pool, overall_cid))
+  pool_monthly <- vector("list", n_pool)
+  pool_summary <- vector("list", n_pool)
+  pool_histogram <- vector("list", n_pool)
+  pool_keys <- names(rows_by_unit)
+  for (i in seq_len(n_pool)) {
+    uid <- if (pool_keys[i] == "\x1fNA") NA else pool_keys[i]
+    grp <- df[rows_by_unit[[i]], , drop = FALSE]
+    logn(sprintf(
+      "[drift] pool %d/%d (%s unit=%s, %d rows across %d concepts)",
+      i, n_pool, overall_cid, as.character(uid), nrow(grp),
+      length(unique(grp$measurement_concept_id))))
+    res <- tryCatch(
+      .driftForGroup(grp, overall_cid, uid,
+                     minMonthObs, nBins,
+                     changepointPenalty, driftPsiThreshold,
+                     wassersteinAnomalyMultiplier,
+                     hampelWindowMonths, hampelThreshold,
+                     minRegimeMonths,
+                     memoryBudgetBytes, safetyFactor,
+                     driftLogLevel = driftLogLevel),
+      error = function(e) {
+        ParallelLogger::logWarn(sprintf(
+          "Pooled drift failed for %s unit=%s: %s",
+          overall_cid, as.character(uid), conditionMessage(e)))
+        NULL
+      }
+    )
+    if (!is.null(res)) {
+      pool_monthly[[i]] <- res$monthly
+      pool_summary[[i]] <- res$summary
+      pool_histogram[[i]] <- res$histogram
+    }
+    rm(grp, res)
+    invisible(gc(verbose = FALSE, full = TRUE))
+  }
+
   outputs <- list(
-    monthly = dplyr::bind_rows(monthly_all),
-    summary = dplyr::bind_rows(summary_all),
-    histogram = dplyr::bind_rows(histogram_all)
+    monthly = dplyr::bind_rows(c(monthly_all, pool_monthly)),
+    summary = dplyr::bind_rows(c(summary_all, pool_summary)),
+    histogram = dplyr::bind_rows(c(histogram_all, pool_histogram))
   )
 
   .writeDriftCsvs(outputs, baseFilePath)
   loga(sprintf(
-    "[drift] .computeDrift exit: %d groups processed in %.1fs total",
-    n_groups,
+    "[drift] .computeDrift exit: %d per-concept + %d pooled groups processed in %.1fs total",
+    n_groups, n_pool,
     as.numeric(difftime(Sys.time(), t_entry, units = "secs"))))
   invisible(outputs)
 }

@@ -87,6 +87,23 @@
 #' @param minRegimeMonths   Minimum duration (in months) for a regime,
 #'                          enforced natively by `changepoint.np::cpt.np`
 #'                          via `minseglen`. Default 3.
+#' @param maxOriginPoolSize Maximum number of values to keep in either the
+#'                          origin reference pool (used for `*_origin`
+#'                          Wasserstein / PSI / JSD comparisons) or a
+#'                          current-regime pool (used for `*_current`
+#'                          comparisons). When either pool holds more values
+#'                          than this, a reproducibly-seeded random
+#'                          subsample without replacement is drawn once per
+#'                          (concept, unit, pool) and used as the reference
+#'                          for every subsequent monthly comparison against
+#'                          that pool. Wasserstein-1 in one dimension
+#'                          converges quickly enough that a 200k-500k
+#'                          subsample is within a few percent of the
+#'                          full-pool value for typical measurement
+#'                          distributions, and capping cuts the O(m + n)
+#'                          per-month cost roughly proportionally. Pass
+#'                          `Inf` to disable capping and use the full pools.
+#'                          Default 500000.
 #' @param memoryBudgetBytes Numeric byte figure. When the total observation
 #'                          count for a (concept, unit) group would push
 #'                          memory past `budget / (8 * safetyFactor)` (8 is
@@ -114,6 +131,7 @@
                           hampelWindowMonths = 6L,
                           hampelThreshold = 3.5,
                           minRegimeMonths,
+                          maxOriginPoolSize = 500000L,
                           memoryBudgetBytes = Inf,
                           safetyFactor = 5,
                           driftLogLevel = "normal") {
@@ -199,7 +217,7 @@
                      changepointPenalty, driftPsiThreshold,
                      wassersteinAnomalyMultiplier,
                      hampelWindowMonths, hampelThreshold,
-                     minRegimeMonths,
+                     minRegimeMonths, maxOriginPoolSize,
                      memoryBudgetBytes, safetyFactor,
                      driftLogLevel = driftLogLevel),
       error = function(e) {
@@ -264,7 +282,7 @@
                      changepointPenalty, driftPsiThreshold,
                      wassersteinAnomalyMultiplier,
                      hampelWindowMonths, hampelThreshold,
-                     minRegimeMonths,
+                     minRegimeMonths, maxOriginPoolSize,
                      memoryBudgetBytes, safetyFactor,
                      driftLogLevel = driftLogLevel),
       error = function(e) {
@@ -337,7 +355,7 @@
                            changepointPenalty, driftPsiThreshold,
                            wassersteinAnomalyMultiplier,
                            hampelWindowMonths, hampelThreshold,
-                           minRegimeMonths,
+                           minRegimeMonths, maxOriginPoolSize,
                            memoryBudgetBytes = Inf,
                            safetyFactor = 5,
                            driftLogLevel = "normal") {
@@ -557,6 +575,32 @@
     return(NULL)
   }
 
+  # Cap the origin reference pool. Wasserstein-1 in one dimension converges
+  # quickly enough that a subsample of a few hundred thousand values is
+  # within a few percent of the full-pool value for typical measurement
+  # distributions, and capping cuts the per-month O(m + n) cost
+  # proportionally. The cap fires once per group; the same subsample is
+  # then used as the reference for every subsequent monthly comparison in
+  # this group. The RNG is seeded deterministically from (cid, uid,
+  # maxOriginPoolSize) so results are reproducible across runs and
+  # independent across groups.
+  origin_n_obs_available <- length(origin_values)
+  origin_pool_capped <- FALSE
+  if (is.finite(maxOriginPoolSize) &&
+      origin_n_obs_available > maxOriginPoolSize) {
+    seed_str <- paste(as.character(cid), as.character(uid),
+                      as.integer(maxOriginPoolSize), sep = "|")
+    set.seed(sum(utf8ToInt(seed_str)) %% .Machine$integer.max)
+    origin_values <- sample(origin_values,
+                            size = as.integer(maxOriginPoolSize),
+                            replace = FALSE)
+    origin_pool_capped <- TRUE
+    logn(sprintf(
+      "%s origin pool capped: %d -> %d values (maxOriginPoolSize = %d)",
+      tag, origin_n_obs_available, length(origin_values),
+      as.integer(maxOriginPoolSize)))
+  }
+
   bin_breaks <- .quantileBinBreaks(origin_values, nBins)
   if (is.null(bin_breaks)) {
     loga(sprintf(
@@ -623,10 +667,28 @@
     regime_values <- unlist(monthly$values[regime_rows], use.names = FALSE)
     regime_values <- regime_values[!is.na(regime_values)]
     if (length(regime_values) < minMonthObs) next
+    # Apply the same size cap to the regime reference pool as to the origin
+    # pool, following the same rationale: Wasserstein-1 convergence in 1D
+    # does not require the full pool once it is well over the cap, and
+    # capping keeps the per-month O(m + n) cost bounded for large regimes.
+    # A separate seed component (`rid`) makes each regime's subsample
+    # independent of the origin subsample and other regimes' subsamples,
+    # while remaining reproducible.
+    if (is.finite(maxOriginPoolSize) &&
+        length(regime_values) > maxOriginPoolSize) {
+      seed_str <- paste(as.character(cid), as.character(uid),
+                        as.integer(maxOriginPoolSize), "rid", rid, sep = "|")
+      set.seed(sum(utf8ToInt(seed_str)) %% .Machine$integer.max)
+      regime_values <- sample(regime_values,
+                              size = as.integer(maxOriginPoolSize),
+                              replace = FALSE)
+      logn(sprintf(
+        "%s current-regime R%d pool capped at %d values",
+        tag, as.integer(rid), as.integer(maxOriginPoolSize)))
+    }
     regime_hist <- .valuesToHistProps(regime_values, bin_breaks)
-    # Pre-sort the regime pool once so all monthly Wasserstein calls within
-    # this regime skip the redundant sort (byte-identical output, big speedup
-    # when the regime pool is millions of values).
+    # Pre-sort the regime pool once so every monthly Wasserstein call within
+    # this regime skips the redundant sort of the pool.
     regime_values_sorted <- sort(regime_values)
 
     for (m in regime_rows) {
@@ -736,6 +798,8 @@
     origin_baseline_end = utils::tail(origin_months, 1),
     origin_n_months = length(origin_months),
     origin_n_obs = length(origin_values),
+    origin_n_obs_available = origin_n_obs_available,
+    origin_pool_capped = origin_pool_capped,
     n_bins = n_bins_actual,
     n_regimes = n_regimes,
     regime_change_months = paste(regime_starts, collapse = ";"),
@@ -1512,6 +1576,8 @@
     origin_baseline_end = character(0),
     origin_n_months = integer(0),
     origin_n_obs = integer(0),
+    origin_n_obs_available = integer(0),
+    origin_pool_capped = logical(0),
     n_bins = integer(0),
     n_regimes = integer(0),
     regime_change_months = character(0),

@@ -79,6 +79,7 @@ calculate_mode <- function(x) {
 #' @param resume                    If TRUE and a per-check Andromeda cache file already exists at `<baseFilePath>.andromeda`, load it and skip re-running the SQL query. If FALSE, or if no cache file is present, run the query and (re)write the cache. Cached Andromeda files are keyed by check name; changing the SQL for a check requires deleting the corresponding `.andromeda` file to avoid loading stale results.
 #' @param computeDrift              Whether to run the temporal drift extension on numeric checks. Default TRUE.
 #' @param minRegimeMonths           Minimum months required for a regime, enforced natively by changepoint.np during segmentation (minseglen). Default 3.
+#' @param maxOriginPoolSize         Maximum size of the origin reference pool for Wasserstein / PSI / JSD comparisons; see `.computeDrift` for details. Default 500000.
 #' @param driftMemoryBudgetBytes    Per-worker memory budget (in bytes) used to decide when to subsample large months.
 #' @param driftLogLevel             Verbosity of drift-computation log output: "quiet" (concept summary + errors only), "normal" (default; all phase logs), or "verbose".
 #'
@@ -96,6 +97,7 @@ calculate_mode <- function(x) {
                           resume,
                           computeDrift,
                           minRegimeMonths,
+                          maxOriginPoolSize,
                           driftMemoryBudgetBytes,
                           driftLogLevel) {
   singleThreaded <- TRUE
@@ -324,6 +326,7 @@ calculate_mode <- function(x) {
                 withCallingHandlers(
                   .computeDrift(qData = qData, baseFilePath = baseFilePath,
                                 minRegimeMonths = minRegimeMonths,
+                                maxOriginPoolSize = maxOriginPoolSize,
                                 memoryBudgetBytes = driftMemoryBudgetBytes,
                                 driftLogLevel = driftLogLevel),
                   warning = function(w) {

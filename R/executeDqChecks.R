@@ -53,6 +53,7 @@
 #' @param conceptCheckThresholdLoc  The location of the threshold file for evaluating the concept checks. If not specified the default thresholds will be applied.
 #' @param computeDrift              Boolean to enable the temporal data-drift analysis on numeric checks. Emits per (concept, unit) and pooled bucket-by-unit rows containing PSI, Wasserstein-1, and JSD against both the first-regime baseline and the current-regime baseline; non-parametric PELT change-point segmentation on monthly medians via changepoint.np; and a Hampel-filter outlier flag on monthly means. Adds three CSVs alongside the existing numeric stats outputs. Default TRUE.
 #' @param minRegimeMonths           Minimum months required for a regime, enforced natively by changepoint.np during segmentation (minseglen). Default is 3.
+#' @param maxOriginPoolSize         Maximum number of values kept in the origin reference pool used by each per-month Wasserstein/PSI/JSD comparison. When the first regime holds more values than this, a single reproducibly-seeded random subsample without replacement is drawn once per (concept, unit) group and used as the reference for every subsequent monthly comparison in that group. Wasserstein-1 in one dimension converges quickly enough that the subsample is within a few percent of the full-pool value for typical measurement distributions; capping proportionally reduces the per-month O(m + n) cost. Pass `Inf` to disable capping. Default is 500000.
 #' @param resume                    Boolean controlling whether numeric-check Andromeda cache files are reused when present. TRUE (default) reuses cached raw pulls to save warehouse time on re-runs. Set FALSE to force fresh SQL execution.
 #' @param driftMemoryBudgetMB       Memory budget (in MB) for the drift computation, used to decide when to subsample months for concepts too large to fit in RAM. Accepts `"auto"` (default, detects free system memory and reserves 25% divided by `numThreads`), a numeric MB value (divided by `numThreads` for per-worker share), or `Inf` to disable subsampling. When subsampling occurs, per-concept summary rows record `subsampled_any`, `pct_obs_used`, `subsample_cap_per_month`, and per-month rows record both `n_obs` (original) and `n_obs_used`.
 #' @param driftLogLevel             Verbosity of drift-computation log output. `"quiet"` emits only the per-concept summary line + abort reasons + errors (roughly 1 line per concept, plus 2 for the whole run). `"normal"` (default) also emits phase-level progress inside each concept (~10 lines per concept, matches pre-2.9.1 behavior). `"verbose"` reserved for future per-call diagnostics.
@@ -100,6 +101,7 @@ executeDqChecks <- function(connectionDetails,
                             conceptCheckThresholdLoc = "default",
                             computeDrift = TRUE,
                             minRegimeMonths = 3,
+                            maxOriginPoolSize = 500000,
                             resume = TRUE,
                             driftMemoryBudgetMB = "auto",
                             driftLogLevel = "normal") {
@@ -130,6 +132,8 @@ executeDqChecks <- function(connectionDetails,
   stopifnot(is.logical(computeDrift), length(computeDrift) == 1)
   stopifnot(is.numeric(minRegimeMonths), length(minRegimeMonths) == 1,
             minRegimeMonths >= 1)
+  stopifnot(is.numeric(maxOriginPoolSize), length(maxOriginPoolSize) == 1,
+            is.infinite(maxOriginPoolSize) || maxOriginPoolSize >= 1000)
   stopifnot(is.logical(resume), length(resume) == 1)
   stopifnot(
     length(driftMemoryBudgetMB) == 1 &&
@@ -219,6 +223,7 @@ executeDqChecks <- function(connectionDetails,
       conceptCheckThresholdLoc = conceptCheckThresholdLoc,
       computeDrift = computeDrift,
       minRegimeMonths = minRegimeMonths,
+      maxOriginPoolSize = maxOriginPoolSize,
       resume = resume,
       driftMemoryBudgetMB = driftMemoryBudgetMB,
       driftLogLevel = driftLogLevel
@@ -442,6 +447,7 @@ executeDqChecks <- function(connectionDetails,
     sqlOnly,
     computeDrift,
     minRegimeMonths,
+    maxOriginPoolSize,
     resume,
     driftMemoryBudgetBytes,
     driftLogLevel,

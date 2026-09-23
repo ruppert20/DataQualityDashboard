@@ -38,6 +38,7 @@
 #' @param sqlOnly                   Should the SQLs be executed (FALSE) or just returned (TRUE)?
 #' @param computeDrift              Whether to compute data drift metrics for numeric checks. Default TRUE.
 #' @param minRegimeMonths           Minimum months required for a regime, enforced natively by changepoint.np during segmentation (minseglen). Default 3.
+#' @param maxOriginPoolSize         Maximum size of the origin reference pool for Wasserstein / PSI / JSD comparisons. When the first regime holds more values, a reproducibly-seeded random subsample is drawn once per (concept, unit) group. Pass `Inf` to disable capping. Default 500000.
 #' @param resume                    Whether to resume from existing Andromeda cache files. Default TRUE.
 #' @param driftMemoryBudgetBytes    Per-worker memory budget (bytes) for drift subsampling.
 #' @param driftLogLevel             Verbosity of drift-computation log output ("quiet", "normal", or "verbose").
@@ -70,6 +71,7 @@
                       sqlOnly,
                       computeDrift,
                       minRegimeMonths,
+                      maxOriginPoolSize,
                       resume,
                       driftMemoryBudgetBytes,
                       driftLogLevel) {
@@ -156,6 +158,7 @@
           resume = resume,
           computeDrift = computeDrift,
           minRegimeMonths = minRegimeMonths,
+          maxOriginPoolSize = maxOriginPoolSize,
           driftMemoryBudgetBytes = driftMemoryBudgetBytes,
           driftLogLevel = driftLogLevel
         )

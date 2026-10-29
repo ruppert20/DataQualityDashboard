@@ -128,3 +128,5 @@ DataQualityDashboard latest release (representing code in the `main` branch) is 
 
 <b id="f1">1</b> Kahn, M.G., et al., A Harmonized Data Quality Assessment Terminology and Framework for the Secondary Use of Electronic Health Record Data. EGEMS (Wash DC), 2016. 4(1): p. 1244. [↩](#kahn)
 
+# Disclaimer
+This software is provided "as is", without warranty of any kind. The authors of this work will not be liable for any claim, damages or other liability arising in connection with this software.

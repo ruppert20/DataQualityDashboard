@@ -44,8 +44,12 @@ FROM (
 				ON m.person_id = c.subject_id
 				AND c.cohort_definition_id = @cohortDefinitionId
 		}
-		WHERE m.@cdmFieldName = @conceptId
-			AND m.unit_concept_id = @unitConceptId
+		WHERE m.@cdmFieldName IN (@conceptId)
+			{@unitConceptId NOT IN ('NA', -1, FALSE, '')}?{
+				AND m.unit_concept_id IN (@unitConceptId)
+			}:{
+				AND m.unit_concept_id IS NULL
+			}
 			AND m.value_as_number IS NOT NULL
 			AND m.value_as_number < @plausibleValueLow
 			{@cohort & @cohortFilterType == 'PersonDate' & @endDateColumn != ''}?{
@@ -87,8 +91,12 @@ FROM (
 			ON m.person_id = c.subject_id
 			AND c.cohort_definition_id = @cohortDefinitionId
 	}
-	WHERE m.@cdmFieldName = @conceptId
-		AND unit_concept_id = @unitConceptId
+	WHERE m.@cdmFieldName IN (@conceptId)
+		{@unitConceptId NOT IN ('NA', -1, FALSE, '')}?{
+			AND m.unit_concept_id IN (@unitConceptId)
+		}:{
+			AND m.unit_concept_id IS NULL
+		}
 		AND value_as_number IS NOT NULL
 		{@cohort & @cohortFilterType == 'PersonDate' & @endDateColumn != ''}?{
 			AND m.@dateColumn <= c.cohort_end_date
